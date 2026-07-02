@@ -14,7 +14,7 @@ from vulnagent.reports.models import BinaryVulnerabilityReport
 
 DEFAULT_PROJECT_ID = "default"
 DEFAULT_DB_PATH = "./data/vulnagent.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _utc_now() -> str:
@@ -138,6 +138,30 @@ class SqliteVulnRepository:
                     output_json TEXT NOT NULL DEFAULT 'null',
                     status TEXT NOT NULL DEFAULT 'complete',
                     created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS harness_runs (
+                    id TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    thread_id TEXT REFERENCES chat_threads(id) ON DELETE SET NULL,
+                    report_id TEXT DEFAULT '',
+                    answer TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS harness_trace_events (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES harness_runs(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    message TEXT NOT NULL DEFAULT '',
+                    data_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(run_id, sequence)
                 );
 
                 CREATE TABLE IF NOT EXISTS chat_summaries (
@@ -343,6 +367,7 @@ class SqliteVulnRepository:
                 "findings": connection.execute("SELECT COUNT(*) FROM findings").fetchone()[0],
                 "threads": connection.execute("SELECT COUNT(*) FROM chat_threads").fetchone()[0],
                 "tool_events": connection.execute("SELECT COUNT(*) FROM tool_events").fetchone()[0],
+                "harness_runs": connection.execute("SELECT COUNT(*) FROM harness_runs").fetchone()[0],
             }
 
     def create_chat_thread(self, *, sample_id: str | None = None, title: str = "New investigation") -> str:
@@ -583,3 +608,117 @@ class SqliteVulnRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def persist_harness_run(
+        self,
+        *,
+        run_id: str,
+        mode: str,
+        status: str,
+        thread_id: str = "",
+        report_id: str = "",
+        answer: str = "",
+        error: str = "",
+        started_at: str,
+        finished_at: str,
+        trace_events: Sequence[Any] = (),
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO harness_runs(
+                    id, mode, status, thread_id, report_id, answer, error,
+                    metadata_json, started_at, finished_at
+                )
+                VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    mode = excluded.mode,
+                    status = excluded.status,
+                    thread_id = excluded.thread_id,
+                    report_id = excluded.report_id,
+                    answer = excluded.answer,
+                    error = excluded.error,
+                    metadata_json = excluded.metadata_json,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at
+                """,
+                (
+                    run_id,
+                    mode,
+                    status,
+                    thread_id,
+                    report_id,
+                    answer,
+                    error,
+                    _json_dumps(metadata or {}),
+                    started_at,
+                    finished_at,
+                ),
+            )
+            connection.execute("DELETE FROM harness_trace_events WHERE run_id = ?", (run_id,))
+            for sequence, event in enumerate(trace_events):
+                event_id = getattr(event, "event_id", "") or uuid4().hex
+                event_type = getattr(event, "event_type", "")
+                message = getattr(event, "message", "")
+                data = getattr(event, "data", {})
+                created_at = getattr(event, "created_at", _utc_now())
+                if hasattr(created_at, "isoformat"):
+                    created_at = created_at.isoformat()
+                connection.execute(
+                    """
+                    INSERT INTO harness_trace_events(
+                        id, run_id, sequence, event_type, message, data_json, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        run_id,
+                        sequence,
+                        event_type,
+                        message,
+                        _json_dumps(data),
+                        str(created_at),
+                    ),
+                )
+        return run_id
+
+    def list_harness_runs(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, mode, status, thread_id, report_id, answer, error,
+                       metadata_json, started_at, finished_at
+                FROM harness_runs
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_harness_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            run = connection.execute(
+                """
+                SELECT id, mode, status, thread_id, report_id, answer, error,
+                       metadata_json, started_at, finished_at
+                FROM harness_runs
+                WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                return None
+            events = connection.execute(
+                """
+                SELECT id, run_id, sequence, event_type, message, data_json, created_at
+                FROM harness_trace_events
+                WHERE run_id = ?
+                ORDER BY sequence ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        result = dict(run)
+        result["trace_events"] = [dict(row) for row in events]
+        return result

@@ -18,13 +18,16 @@ import streamlit as st
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
-from vulnagent.agent.baseline_scan import BaselineScanConfig, BaselineScanner, ScanProgress
+from vulnagent.agent.baseline_scan import BaselineScanConfig, ScanProgress
 from vulnagent.agent.context_builder import ContextBudget
 from vulnagent.agent import execution_limits as agent_limits
 from vulnagent.agent.llm import get_llm_status
-from vulnagent.agent.standalone import StandaloneBinaryVulnerabilityAgent
-from vulnagent.clients.async_ida_client import AsyncIdaClient
 from vulnagent.clients.ida_client import IdaClient
+from vulnagent.harness import (
+    BinaryVulnAgentHarness,
+    HarnessBaselineScanRequest,
+    HarnessTurnRequest,
+)
 from vulnagent.reports import BinaryVulnerabilityReport, FileReportStore
 from vulnagent.reports.store import REPORT_ID_RE
 from vulnagent.storage import SqliteVulnRepository
@@ -486,6 +489,58 @@ def _inject_styles() -> None:
         .va-tool-card-result {
             border-left-color: var(--va-green);
         }
+        .va-run-item {
+            width: 100%;
+            margin: 0.35rem 0;
+            padding: 0.5rem 0.55rem;
+            border: 1px solid #e5eaf0;
+            border-left: 3px solid var(--va-blue);
+            border-radius: 6px;
+            background: #f8fafc;
+            color: var(--va-ink-soft);
+            font-size: 0.74rem;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+        .va-run-item-failed {
+            border-left-color: var(--va-accent);
+            background: #fff7f7;
+        }
+        .va-trace-item {
+            position: relative;
+            margin: 0 0 0.45rem 0.35rem;
+            padding: 0.48rem 0.55rem 0.48rem 0.72rem;
+            border-left: 2px solid var(--va-line-strong);
+            background: #f8fafc;
+            border-radius: 0 6px 6px 0;
+            color: var(--va-ink-soft);
+            font-size: 0.74rem;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+        .va-trace-item::before {
+            position: absolute;
+            top: 0.7rem;
+            left: -0.32rem;
+            width: 0.55rem;
+            height: 0.55rem;
+            border-radius: 50%;
+            content: "";
+            background: var(--va-blue);
+            border: 2px solid #ffffff;
+        }
+        .va-trace-item-failed::before {
+            background: var(--va-accent);
+        }
+        .va-trace-type {
+            color: var(--va-ink);
+            font-weight: 760;
+        }
+        .va-trace-meta {
+            margin-top: 0.18rem;
+            color: var(--va-muted);
+            font-size: 0.68rem;
+        }
         .va-tool-title {
             display: flex;
             align-items: center;
@@ -662,6 +717,13 @@ def _repository() -> SqliteVulnRepository:
     return SqliteVulnRepository(st.session_state.get("db_path", DEFAULT_DB_PATH))
 
 
+def _harness() -> BinaryVulnAgentHarness:
+    return BinaryVulnAgentHarness(
+        repository=_repository(),
+        timeout=DEFAULT_TIMEOUT,
+    )
+
+
 def _ida_client() -> IdaClient:
     return IdaClient(
         st.session_state.get("backend_url", DEFAULT_BACKEND_URL),
@@ -734,28 +796,25 @@ def _scan_config() -> BaselineScanConfig:
 async def _run_baseline_scan(
     progress_callback,
 ) -> BinaryVulnerabilityReport:
-    async with AsyncIdaClient(
-        st.session_state.backend_url,
-        timeout=DEFAULT_TIMEOUT,
-    ) as client:
-        return await BaselineScanner(
-            client,
-            _report_store(),
-            progress_callback=progress_callback,
-            persistence=_repository(),
-        ).run(
+    result = await _harness().run_baseline_scan(
+        HarnessBaselineScanRequest(
             thread_id=st.session_state.get("active_chat_thread_id", ""),
+            ida_backend_url=st.session_state.backend_url,
+            report_dir=st.session_state.report_dir,
             config=_scan_config(),
-        )
+        ),
+        progress_callback=progress_callback,
+    )
+    if result.status != "completed" or result.report is None:
+        raise RuntimeError(result.error or "Baseline scan failed")
+    st.session_state.active_harness_run_id = result.run_id
+    return result.report
 
 
 def _start_scan() -> None:
     status = st.status("Starting baseline scan", expanded=True)
-    current_stage = ""
 
     def report_progress(progress: ScanProgress) -> None:
-        nonlocal current_stage
-        current_stage = progress.stage
         status.update(label=progress.message, state="running")
         status.write({"stage": progress.stage, **progress.data})
 
@@ -1120,6 +1179,17 @@ def _decode_tool_json(value: Any) -> Any:
     return value
 
 
+def _decode_json_field(value: Any, default: Any) -> Any:
+    if not value:
+        return default
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+    return value
+
+
 def _render_recent_tool_events(thread_id: str, *, limit: int = 6) -> None:
     events = _repository().list_tool_events(thread_id)[-limit:] if thread_id else []
     st.markdown('<div class="va-panel-card">', unsafe_allow_html=True)
@@ -1143,8 +1213,126 @@ def _render_recent_tool_events(thread_id: str, *, limit: int = 6) -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _render_recent_harness_runs(*, limit: int = 8) -> None:
+    repository = _repository()
+    runs = repository.list_harness_runs(limit=limit)
+    active_run_id = st.session_state.get("active_harness_run_id", "")
+    if not active_run_id and runs:
+        active_run_id = runs[0]["id"]
+        st.session_state.active_harness_run_id = active_run_id
+
+    st.markdown('<div class="va-panel-card">', unsafe_allow_html=True)
+    st.markdown('<div class="va-panel-title">Recent Harness Runs</div>', unsafe_allow_html=True)
+    if not runs:
+        st.markdown(
+            '<div class="va-mini-empty">No harness runs have been recorded.</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    for index, run in enumerate(runs):
+        is_active = run["id"] == active_run_id
+        state = "ok" if run["status"] == "completed" else "error"
+        run_class = "va-run-item" if run["status"] == "completed" else "va-run-item va-run-item-failed"
+        st.markdown(
+            (
+                f'<div class="{run_class}">'
+                f'<strong>{html.escape(str(run["mode"]))}</strong> '
+                f'<span class="va-pill va-pill-{state}">{html.escape(str(run["status"]))}</span><br>'
+                f"{html.escape(_short_text(run['id'], 34))}<br>"
+                f"<span>{html.escape(_short_text(run.get('started_at', ''), 36))}</span>"
+                f"{' | active' if is_active else ''}"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+        if st.button(
+            f"Open run {index + 1}",
+            key=f"harness-run-open-{run['id']}",
+            width="stretch",
+        ):
+            st.session_state.active_harness_run_id = run["id"]
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_harness_trace_panel() -> None:
+    run_id = st.session_state.get("active_harness_run_id", "")
+    run = _repository().get_harness_run(run_id) if run_id else None
+    st.markdown('<div class="va-panel-card">', unsafe_allow_html=True)
+    st.markdown('<div class="va-panel-title">Trace Timeline</div>', unsafe_allow_html=True)
+    if not run:
+        st.markdown(
+            '<div class="va-mini-empty">Select a harness run to inspect its trace.</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    state = "ok" if run["status"] == "completed" else "error"
+    st.markdown(
+        (
+            '<div class="va-panel-kv">'
+            f"<span>Run</span><span>{html.escape(_short_text(run['id'], 72))}</span>"
+            f"<span>Mode</span><span>{html.escape(str(run['mode']))}</span>"
+            f"<span>Status</span><span><span class=\"va-pill va-pill-{state}\">{html.escape(str(run['status']))}</span></span>"
+            f"<span>Report</span><span>{html.escape(run.get('report_id') or '-')}</span>"
+            f"<span>Thread</span><span>{html.escape(run.get('thread_id') or '-')}</span>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+    if run.get("error"):
+        st.error(run["error"])
+
+    action_columns = st.columns(2)
+    if run.get("report_id") and action_columns[0].button(
+        ":material/description: Open Report",
+        key=f"harness-open-report-{run['id']}",
+        width="stretch",
+    ):
+        st.session_state.active_report_id = run["report_id"]
+        st.session_state.workspace_mode = "Analysis Workspace"
+        st.session_state.analysis_view = "Report"
+        st.rerun()
+    if run.get("thread_id") and action_columns[1].button(
+        ":material/chat: Open Chat",
+        key=f"harness-open-chat-{run['id']}",
+        width="stretch",
+    ):
+        st.session_state.active_chat_thread_id = run["thread_id"]
+        st.session_state.loaded_chat_thread_id = run["thread_id"]
+        st.session_state.agent_messages = _repository().load_chat_messages(run["thread_id"])
+        st.session_state.workspace_mode = "Agent Chat"
+        st.rerun()
+
+    for event in run.get("trace_events", []):
+        data = _decode_json_field(event.get("data_json"), {})
+        event_type = str(event.get("event_type", ""))
+        item_class = (
+            "va-trace-item va-trace-item-failed"
+            if "fail" in event_type.lower()
+            else "va-trace-item"
+        )
+        st.markdown(
+            (
+                f'<div class="{item_class}">'
+                f'<div class="va-trace-type">[{event.get("sequence", 0)}] '
+                f"{html.escape(event_type)}</div>"
+                f"<div>{html.escape(_short_text(event.get('message', ''), 130))}</div>"
+                f'<div class="va-trace-meta">{html.escape(_short_text(data, 150))}</div>'
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def _render_right_rail(thread_id: str, messages: list[BaseMessage] | None = None) -> None:
     _render_investigation_state_panel(thread_id)
+    _render_recent_harness_runs()
+    _render_harness_trace_panel()
     _render_budget_panel(thread_id, messages)
     _render_recent_tool_events(thread_id)
 
@@ -1399,22 +1587,21 @@ def _render_agent_chat(status: dict[str, Any]) -> None:
 
     with st.status("Agent is analyzing the binary", expanded=True) as agent_status:
         try:
-            runtime = StandaloneBinaryVulnerabilityAgent(
-                ida_backend_url=st.session_state.backend_url,
-                report_dir=st.session_state.report_dir,
-                repository=_repository(),
-            )
-            st.session_state.agent_messages = asyncio.run(
-                runtime.ask(
-                    prompt,
-                    messages,
-                    thread_id=st.session_state.active_chat_thread_id,
+            result = asyncio.run(
+                _harness().run_agent_chat(
+                    HarnessTurnRequest(
+                        prompt=prompt,
+                        messages=messages,
+                        thread_id=st.session_state.active_chat_thread_id,
+                        ida_backend_url=st.session_state.backend_url,
+                        report_dir=st.session_state.report_dir,
+                    )
                 )
             )
-            _repository().save_chat_messages(
-                st.session_state.active_chat_thread_id,
-                st.session_state.agent_messages,
-            )
+            if result.status != "completed":
+                raise RuntimeError(result.error or "Agent request failed")
+            st.session_state.agent_messages = result.messages
+            st.session_state.active_harness_run_id = result.run_id
         except Exception as exc:  # noqa: BLE001 - surface LLM and tool failures in the UI
             agent_status.update(label="Agent request failed", state="error")
             st.error(f"{type(exc).__name__}: {exc}")

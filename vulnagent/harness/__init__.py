@@ -1,20 +1,21 @@
-"""VulnAgent V2 package."""
+"""Agent harness runtime for VulnAgent."""
 
-__version__ = "0.2.0"
-
-from vulnagent.harness import (
-    BinaryVulnAgentHarness,
+from vulnagent.harness.runtime import BinaryVulnAgentHarness
+from vulnagent.harness.schemas import (
     HarnessBaselineScanRequest,
+    HarnessMode,
     HarnessRunResult,
+    HarnessStatus,
     HarnessTraceEvent,
     HarnessTurnRequest,
 )
 
 __all__ = [
-    "__version__",
     "BinaryVulnAgentHarness",
     "HarnessBaselineScanRequest",
+    "HarnessMode",
     "HarnessRunResult",
+    "HarnessStatus",
     "HarnessTraceEvent",
     "HarnessTurnRequest",
 ]

@@ -24,6 +24,7 @@
 - 结构化工具结果：工具返回 JSON，包含 confirmed sources、pending sinks、missing evidence、function notes 等字段。
 - 执行治理：限制单轮工具调用、重复调用、扫描次数和运行时间，避免 Agent 无效循环。
 - SQLite 持久化：保存扫描报告、Agent 对话、工具调用事件和调查状态。
+- Agent Harness：统一封装 Agent Chat、Baseline Scan、上下文准备、SQLite 持久化、执行轨迹和结构化结果输出。
 - Streamlit 工作台：支持 Baseline Scan、报告查看、路由分析、Source 展示、函数反编译和 Agent Chat。
 - 受控写操作：支持在非只读模式下进行函数重命名、注释、字节 Patch、NOP 和保存数据库等操作，并通过确认机制降低误修改风险。
 
@@ -44,6 +45,7 @@ VulnAgent-V2/
   vulnagent/
     agent/          Agent 工作流、上下文管理、执行限制、Baseline Scan
     clients/        IDA HTTP 客户端
+    harness/        Agent Harness 运行层，统一任务入口、结果和 trace
     ida/            IDA FastAPI 后端、IDALib 实现、协议 Schema
     tools/          LangChain / LangGraph 工具封装
     storage/        SQLite 存储
@@ -137,6 +139,34 @@ http://127.0.0.1:8501
 3. 查看 Report、Routes、Sources、Function Explorer 等页面。
 4. 进入 Agent Chat，针对可疑函数、Source/Sink 或调用链继续提问。
 5. 查看 SQLite 中保存的历史对话、工具事件和调查状态。
+
+## Harness 架构
+
+VulnAgent-V2 在 LangGraph Agent 外增加了一层轻量 Harness。它不替代 LangGraph，而是作为统一运行边界管理一次分析任务：
+
+```text
+Streamlit UI / CLI / Tests
+  -> BinaryVulnAgentHarness
+      -> ContextBuilder / SQLite
+      -> LangGraph Agent 或 BaselineScanner
+      -> IDA Tools / IDA Backend
+      -> HarnessRunResult
+```
+
+Harness 当前负责：
+
+- 将 Agent Chat 和 Baseline Scan 包装成统一请求与结果。
+- 生成 `run_id` 和 trace event，记录任务开始、进度、完成或失败。
+- 统一调用 SQLite 保存对话历史、工具事件、扫描报告和调查状态。
+- 把异常转换为结构化失败结果，方便 UI、CLI 或后续评测脚本调用。
+
+核心接口位于：
+
+```text
+vulnagent/harness/
+  schemas.py      # HarnessTurnRequest / HarnessBaselineScanRequest / HarnessRunResult
+  runtime.py      # BinaryVulnAgentHarness
+```
 
 示例提问：
 

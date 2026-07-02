@@ -1,4 +1,4 @@
-"""Standalone conversational Agent runtime used by the VulnAgent UI."""
+"""Low-level LangGraph runtime adapter used by the VulnAgent harness."""
 
 from __future__ import annotations
 
@@ -15,7 +15,12 @@ from vulnagent.storage import SqliteVulnRepository
 
 
 class StandaloneBinaryVulnerabilityAgent:
-    """Run the LangGraph IDA investigation Agent without agent-service-toolkit."""
+    """Run one conversational LangGraph IDA investigation loop.
+
+    UI, CLI, and service code should prefer BinaryVulnAgentHarness as the public
+    runtime boundary. This adapter stays focused on prompt/context preparation and
+    graph invocation.
+    """
 
     def __init__(
         self,
