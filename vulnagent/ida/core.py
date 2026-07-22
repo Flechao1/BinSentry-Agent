@@ -81,6 +81,11 @@ class IdaBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_address_xrefs(self, ea: int) -> dict[str, list[XrefRecord]]:
+        """Return xrefs for any code or data address, not only function starts."""
+        raise NotImplementedError
+
+    @abstractmethod
     def get_function_calls(self, ea: int) -> list[CallRecord]:
         raise NotImplementedError
 
@@ -242,6 +247,9 @@ class UnavailableIdaBackend(IdaBackend):
         raise IdaBackendUnavailable(self.reason)
 
     def get_function_xrefs(self, ea: int) -> dict[str, list[XrefRecord]]:
+        raise IdaBackendUnavailable(self.reason)
+
+    def get_address_xrefs(self, ea: int) -> dict[str, list[XrefRecord]]:
         raise IdaBackendUnavailable(self.reason)
 
     def get_function_calls(self, ea: int) -> list[CallRecord]:

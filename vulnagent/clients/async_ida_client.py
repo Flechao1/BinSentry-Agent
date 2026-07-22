@@ -142,6 +142,13 @@ class AsyncIdaClient:
             "from": [XrefRecord.model_validate(item) for item in payload.get("from", [])],
         }
 
+    async def get_address_xrefs(self, ea: int | str) -> dict[str, list[XrefRecord]]:
+        payload = await self._request_object("GET", f"/addresses/{normalize_ea(ea)}/xrefs")
+        return {
+            "to": [XrefRecord.model_validate(item) for item in payload.get("to", [])],
+            "from": [XrefRecord.model_validate(item) for item in payload.get("from", [])],
+        }
+
     async def scan_source_candidates(
         self,
         limit: int = 100,

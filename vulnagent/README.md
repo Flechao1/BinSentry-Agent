@@ -1,8 +1,8 @@
 # VulnAgent
 
 `vulnagent` is a standalone Web/CGI firmware binary vulnerability analysis project.
-IDA runs as a separate HTTP service. The Streamlit UI communicates with it through the
-HTTP clients and persists analysis history in SQLite. JSON report artifacts remain
+IDA runs as a separate HTTP service. The React UI communicates with the VulnAgent
+application API and persists analysis history in SQLite. JSON report artifacts remain
 available for export and interoperability.
 
 ## Install
@@ -28,7 +28,8 @@ defaults need to change.
 
 ## Quick Start
 
-Run from the workspace root. Start the IDA backend first, then start the Streamlit UI.
+Run from the workspace root. Start the IDA backend first, then the application API and
+the React UI.
 
 ### 1. Configure LLM
 
@@ -64,29 +65,44 @@ python -m vulnagent --idb "E:\path\to\sample.i64" --host 127.0.0.1 --port 8765
 Keep the backend terminal open. If port `8765` is already occupied, either stop the old
 process or start on a different port and update `IDA_BACKEND_URL`.
 
-### 3. Start UI
+### 3. Start the application API
 
 Open a second terminal from the workspace root:
 
 ```powershell
-python -m streamlit run vulnagent/ui/app.py
+python -m vulnagent api --host 127.0.0.1 --port 8787
+```
+
+### 4. Start the React UI
+
+Open a third terminal:
+
+```powershell
+cd frontend
+npm install
+npm run dev
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8501
+http://127.0.0.1:5173
 ```
 
-In the sidebar, confirm that `IDA Backend` points to `http://127.0.0.1:8765`.
+The UI connects to `http://127.0.0.1:8787` by default. In the sidebar, confirm that
+the IDA backend is `Connected`.
 
-### 4. Typical Workflow
+### 5. Typical Workflow
 
 1. Open the UI and check that the backend status is `Connected`.
-2. Click `Start Baseline Scan` to run deterministic route/source/sink discovery.
-3. Review `Report`, `Routes`, `Sources`, and `Function Explorer`.
-4. Open `Agent Chat` and ask focused follow-up questions.
-5. Use the saved reports and SQLite-backed chat history for later review.
+2. Click `Start Baseline Scan` to discover routes, Sources, and dangerous Sinks.
+3. The scan automatically traces the arguments of its highest-priority sink candidates
+   and classifies them as `verified`, `unverified`, or `rejected`.
+4. Review the `Candidate Findings` view for evidence and missing validation steps.
+5. In `Agent Chat`, create or select an investigation session before asking focused
+   follow-up questions. Sessions retain their messages, tool events, summary, and
+   investigation state in SQLite; they can be renamed, cleared, or deleted from the
+   sidebar.
 
 Useful Agent Chat prompts:
 
@@ -174,6 +190,57 @@ Trace the first argument of a system call toward likely user-input sources.
 ```
 
 The API key is read from the local environment and is not displayed in the UI.
+
+The React frontend also provides `Model Settings`. It can apply a runtime override
+for the provider, model, base URL, temperature, and output-token budget. An empty API
+key keeps the current key from `.env`; runtime overrides are cleared when the API
+process restarts or when `Reset to .env` is selected.
+
+## Known Vulnerability Intelligence
+
+VulnAgent includes a read-only vulnerability intelligence module for correlating
+firmware evidence with public references. It searches CVE.org website-backed data,
+NVD, and GitHub first and then applies deterministic matching scores; the LLM can
+explain the result, but it should not invent CVE IDs from memory.
+
+Agent-facing tool:
+
+```text
+search_vulnerability_intel
+```
+
+CLI example:
+
+```bash
+python -m vulnagent intel \
+  --vendor "D-Link" \
+  --product "DIR-882" \
+  --firmware-version "1.30B06" \
+  --component "lighttpd" \
+  --vuln-type "command injection" \
+  --route "/dws/api/" \
+  --sink "system" \
+  --symbols "set_ws_action,check_dws_cookie" \
+  --sources "cveorg,nvd,github"
+```
+
+Application API endpoint:
+
+```text
+POST /api/intel/search
+```
+
+Optional environment variables:
+
+```env
+# CVE.org website-backed lookup does not require a token.
+NVD_API_KEY=your-nvd-api-key
+GITHUB_TOKEN=your-github-token
+```
+
+Use this after a candidate or confirmed finding exists. The output distinguishes
+strong matches from weak keyword overlap and includes matched terms, scoring reasons,
+source URLs, and lookup errors.
 
 ## SQLite Storage
 
@@ -305,5 +372,7 @@ agent_config={"workflow": "baseline_scan"}
 ```
 
 The graph performs bounded Web/CGI discovery, source propagation, sink scanning, taint
-tracing, and JSON report persistence. Without that workflow flag, the same graph acts as
-a conversational read-only reverse-engineering assistant.
+tracing for the top-priority sink candidates, and JSON/SQLite report persistence. Each
+candidate is classified as `verified`, `unverified`, or `rejected` with its evidence and
+missing proof recorded. Without that workflow flag, the same graph acts as a
+conversational read-only reverse-engineering assistant.

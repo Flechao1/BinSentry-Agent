@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from vulnagent.clients.ida_client import IdaClient
+from vulnagent.tools.firmware_tools import FirmwareFilesystemTools
+from vulnagent.tools.intel_tools import VulnerabilityIntelTools
 from vulnagent.tools.recon_tools import IdaReconTools
 
 
@@ -12,8 +14,32 @@ def build_readonly_ida_tools(client: IdaClient) -> list[Any]:
     """Create read-only LangChain tools without exposing IDB mutation methods."""
     from langchain_core.tools import StructuredTool
 
+    firmware = FirmwareFilesystemTools()
+    intel = VulnerabilityIntelTools()
     recon = IdaReconTools(client)
     return [
+        StructuredTool.from_function(
+            firmware.scan_firmware_filesystem,
+            name="scan_firmware_filesystem",
+            description=(
+                "Scan an extracted firmware filesystem directory, rank ELF binaries "
+                "worth importing into IDA, and summarize Web endpoints, startup "
+                "references, sensitive files, and source/sink string markers. Use "
+                "this before IDA analysis when the user provides a firmware root "
+                "such as squashfs-root."
+            ),
+        ),
+        StructuredTool.from_function(
+            intel.search_vulnerability_intel,
+            name="search_vulnerability_intel",
+            description=(
+                "Search CVE.org, NVD CVE, and GitHub public references for known "
+                "vulnerability matches using observed firmware/finding evidence such "
+                "as vendor, product, firmware version, route, sink, component, and "
+                "symbols. Use this after a candidate or confirmed finding, not as "
+                "proof by itself."
+            ),
+        ),
         StructuredTool.from_function(
             recon.check_backend,
             name="check_ida_backend",
@@ -48,6 +74,15 @@ def build_readonly_ida_tools(client: IdaClient) -> list[Any]:
             recon.get_function_xrefs,
             name="get_function_xrefs",
             description="Retrieve cross-references to and from one function.",
+        ),
+        StructuredTool.from_function(
+            recon.get_address_xrefs,
+            name="get_address_xrefs",
+            description=(
+                "Retrieve direct cross-references for any code or data address. Use "
+                "this for strings, globals, tables, or an address that is not a "
+                "function entry; use get_function_xrefs only for functions."
+            ),
         ),
         StructuredTool.from_function(
             recon.get_function_signals,
@@ -106,6 +141,16 @@ def build_readonly_ida_tools(client: IdaClient) -> list[Any]:
             recon.scan_sink_calls,
             name="scan_dangerous_sink_calls",
             description="Run a bounded scan for dangerous command and memory-operation sinks.",
+        ),
+        StructuredTool.from_function(
+            recon.validate_sink_candidate,
+            name="validate_sink_candidate",
+            description=(
+                "Validate one discovered sink candidate deterministically. It traces "
+                "the dangerous arguments and returns a verified, unverified, or "
+                "rejected verdict plus missing evidence. Use this before claiming a "
+                "vulnerability."
+            ),
         ),
         StructuredTool.from_function(
             recon.trace_call_chain,

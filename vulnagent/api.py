@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Literal
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -12,13 +14,24 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from pydantic import BaseModel, Field
 
 from vulnagent.agent.baseline_scan import BaselineScanConfig
-from vulnagent.agent.llm import get_llm_status
+from vulnagent.agent.context_builder import ContextBuilder
+from vulnagent.agent.llm import (
+    LlmSettings,
+    build_chat_model,
+    get_active_llm_settings,
+    get_llm_status,
+    reset_runtime_llm_settings,
+    set_runtime_llm_settings,
+)
 from vulnagent.clients.ida_client import IdaClient
+from vulnagent.firmware.scanner import FirmwareFilesystemScanner, attach_ida_backend_commands
 from vulnagent.harness import (
     BinaryVulnAgentHarness,
     HarnessBaselineScanRequest,
+    HarnessTraceEvent,
     HarnessTurnRequest,
 )
+from vulnagent.intel import IntelQuery, VulnerabilityIntelService
 from vulnagent.reports import FileReportStore
 from vulnagent.storage import SqliteVulnRepository
 
@@ -32,10 +45,52 @@ class AgentChatRequest(BaseModel):
     new_thread: bool = False
 
 
+class ChatCreateRequest(BaseModel):
+    title: str = Field(default="New investigation", min_length=1, max_length=72)
+
+
+class ChatRenameRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=72)
+
+
+class LlmConfigRequest(BaseModel):
+    provider: Literal["DeepSeek", "OpenAI-compatible"] = "DeepSeek"
+    model: str = Field(..., min_length=1, max_length=120)
+    base_url: str = Field(default="", max_length=500)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=2400, ge=256, le=128000)
+    # Write-only: an empty value keeps the currently active key.
+    api_key: str = Field(default="", max_length=500)
+
+
 class BaselineScanRequest(BaseModel):
     thread_id: str = ""
     new_thread: bool = False
     config: BaselineScanConfig = Field(default_factory=BaselineScanConfig)
+
+
+class FirmwareTriageRequest(BaseModel):
+    root: str = Field(..., min_length=1)
+    limit: int = Field(default=20, ge=1, le=100)
+    ida_host: str = "127.0.0.1"
+    ida_port: int = Field(default=8765, ge=1, le=65535)
+    writable: bool = False
+
+
+class VulnerabilityIntelRequest(BaseModel):
+    vendor: str = ""
+    product: str = ""
+    firmware_version: str = ""
+    component: str = ""
+    vulnerability_type: str = ""
+    route: str = ""
+    sink: str = ""
+    symbols: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    max_results: int = Field(default=10, ge=1, le=50)
+    sources: list[Literal["cveorg", "nvd", "github"]] = Field(
+        default_factory=lambda: ["cveorg", "nvd", "github"]
+    )
 
 
 def create_app() -> FastAPI:
@@ -80,6 +135,40 @@ def create_app() -> FastAPI:
             },
         }
 
+    @app.get("/api/settings/llm")
+    def get_llm_configuration() -> dict[str, Any]:
+        return get_llm_status()
+
+    @app.post("/api/settings/llm")
+    def update_llm_configuration(request: LlmConfigRequest) -> dict[str, Any]:
+        try:
+            current = get_active_llm_settings()
+        except ValueError:
+            current = None
+        api_key = request.api_key.strip() or (current.api_key if current else "")
+        if not api_key:
+            raise HTTPException(status_code=400, detail="API key is required for the active model")
+        default_url = (
+            "https://api.deepseek.com"
+            if request.provider == "DeepSeek"
+            else (current.base_url if current and current.base_url else "")
+        )
+        settings = LlmSettings(
+            provider=request.provider,
+            api_key=api_key,
+            base_url=request.base_url.strip() or default_url or None,
+            model=request.model.strip(),
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+        )
+        set_runtime_llm_settings(settings)
+        return get_llm_status()
+
+    @app.post("/api/settings/llm/reset")
+    def reset_llm_configuration() -> dict[str, Any]:
+        reset_runtime_llm_settings()
+        return get_llm_status()
+
     @app.get("/api/harness/runs")
     def list_harness_runs(limit: int = 20) -> list[dict[str, Any]]:
         return _repository().list_harness_runs(limit=limit)
@@ -121,9 +210,31 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/api/chats")
-    def create_chat() -> dict[str, str]:
-        thread_id = _repository().create_chat_thread(title="Frontend investigation")
-        return {"thread_id": thread_id}
+    def create_chat(request: ChatCreateRequest) -> dict[str, Any]:
+        repository = _repository()
+        thread_id = repository.create_chat_thread(title=request.title)
+        return repository.get_chat_thread(thread_id) or {"id": thread_id, "title": request.title}
+
+    @app.patch("/api/chats/{thread_id}")
+    def rename_chat(thread_id: str, request: ChatRenameRequest) -> dict[str, Any]:
+        thread = _repository().rename_chat_thread(thread_id, request.title)
+        if thread is None:
+            raise HTTPException(status_code=404, detail="unknown chat thread")
+        return thread
+
+    @app.post("/api/chats/{thread_id}/clear")
+    def clear_chat(thread_id: str) -> dict[str, Any]:
+        repository = _repository()
+        if repository.get_chat_thread(thread_id) is None:
+            raise HTTPException(status_code=404, detail="unknown chat thread")
+        repository.clear_chat_thread(thread_id)
+        return repository.get_chat_thread(thread_id) or {"id": thread_id}
+
+    @app.delete("/api/chats/{thread_id}")
+    def delete_chat(thread_id: str) -> dict[str, bool]:
+        if not _repository().delete_chat_thread(thread_id):
+            raise HTTPException(status_code=404, detail="unknown chat thread")
+        return {"deleted": True}
 
     @app.post("/api/agent/chat")
     async def agent_chat(request: AgentChatRequest) -> dict[str, Any]:
@@ -132,6 +243,8 @@ def create_app() -> FastAPI:
         if request.new_thread or not thread_id:
             thread_id = repository.create_chat_thread(title="Frontend investigation")
         messages = repository.load_chat_messages(thread_id)
+        if _is_context_press_command(request.prompt):
+            return _compress_chat_context(repository, thread_id, messages, request.prompt)
         result = await _harness(repository).run_agent_chat(
             HarnessTurnRequest(
                 prompt=request.prompt,
@@ -160,6 +273,39 @@ def create_app() -> FastAPI:
             )
         )
         return result.model_dump(mode="json", exclude={"messages", "report"})
+
+    @app.post("/api/firmware/triage")
+    def firmware_triage(request: FirmwareTriageRequest) -> dict[str, Any]:
+        try:
+            report = FirmwareFilesystemScanner(request.root).scan(limit=request.limit)
+            attach_ida_backend_commands(
+                report,
+                host=request.ida_host,
+                port=request.ida_port,
+                read_only=not request.writable,
+            )
+            return report.to_dict()
+        except Exception as exc:  # noqa: BLE001 - expose frontend-readable detail
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/intel/search")
+    def search_vulnerability_intel(request: VulnerabilityIntelRequest) -> dict[str, Any]:
+        try:
+            query = IntelQuery(
+                vendor=request.vendor,
+                product=request.product,
+                firmware_version=request.firmware_version,
+                component=request.component,
+                vulnerability_type=request.vulnerability_type,
+                route=request.route,
+                sink=request.sink,
+                symbols=request.symbols,
+                keywords=request.keywords,
+                max_results=request.max_results,
+            )
+            return VulnerabilityIntelService().search(query, sources=request.sources).model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - expose frontend-readable detail
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
 
     @app.get("/api/functions/{ea}/context")
     def function_context(ea: str) -> dict[str, Any]:
@@ -220,6 +366,98 @@ def _harness(repository: SqliteVulnRepository) -> BinaryVulnAgentHarness:
 app = create_app()
 
 
+def _is_context_press_command(prompt: str) -> bool:
+    normalized = " ".join(prompt.strip().lower().split())
+    return normalized in {
+        "/context",
+        "/context press",
+        "/context compress",
+        "/context compact",
+    }
+
+
+def _compress_chat_context(
+    repository: SqliteVulnRepository,
+    thread_id: str,
+    messages: list[BaseMessage],
+    prompt: str,
+) -> dict[str, Any]:
+    keep_recent_turns = int(os.getenv("VULN_CONTEXT_PRESS_KEEP_RECENT_TURNS", "2"))
+    builder = ContextBuilder(
+        repository,
+        summary_llm_factory=lambda: build_chat_model(get_active_llm_settings()),
+    )
+    compressed = builder.compress(
+        thread_id,
+        messages,
+        keep_recent_turns=keep_recent_turns,
+    )
+    answer = (
+        "Context compression completed.\n\n"
+        f"- Original messages: {compressed.original_message_count}\n"
+        f"- Summarized older messages: {compressed.summarized_message_count}\n"
+        f"- Retained recent messages: {compressed.retained_message_count}\n"
+        f"- Summary size: {compressed.summary_chars} chars\n\n"
+        "Future turns will use the compressed summary plus the retained recent messages."
+    )
+    updated_messages = [
+        *compressed.messages,
+        HumanMessage(content=prompt),
+        AIMessage(content=answer),
+    ]
+    repository.save_chat_messages(thread_id, updated_messages)
+
+    run_id = uuid4().hex
+    started_at = datetime.now(timezone.utc)
+    finished_at = datetime.now(timezone.utc)
+    trace_events = [
+        HarnessTraceEvent(
+            run_id=run_id,
+            event_type="run_started",
+            message="Context compression started",
+            data={"thread_id": thread_id},
+            created_at=started_at,
+        ),
+        HarnessTraceEvent(
+            run_id=run_id,
+            event_type="run_completed",
+            message="Context compression completed",
+            data={
+                "original_message_count": compressed.original_message_count,
+                "summarized_message_count": compressed.summarized_message_count,
+                "retained_message_count": compressed.retained_message_count,
+                "summary_chars": compressed.summary_chars,
+            },
+            created_at=finished_at,
+        ),
+    ]
+    repository.persist_harness_run(
+        run_id=run_id,
+        mode="context_compression",
+        status="completed",
+        thread_id=thread_id,
+        answer=answer,
+        error="",
+        started_at=started_at.isoformat(),
+        finished_at=finished_at.isoformat(),
+        trace_events=trace_events,
+        metadata={
+            "original_message_count": compressed.original_message_count,
+            "summarized_message_count": compressed.summarized_message_count,
+            "retained_message_count": compressed.retained_message_count,
+            "summary_chars": compressed.summary_chars,
+        },
+    )
+    return {
+        "run_id": run_id,
+        "status": "completed",
+        "thread_id": thread_id,
+        "answer": answer,
+        "error": "",
+        "messages": _serialize_chat_messages(updated_messages),
+    }
+
+
 def _serialize_chat_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
     """Return frontend-friendly chat messages without leaking LangChain internals."""
     serialized: list[dict[str, Any]] = []
@@ -246,6 +484,7 @@ def _serialize_chat_messages(messages: list[BaseMessage]) -> list[dict[str, Any]
                     "role": "tool",
                     "name": getattr(message, "name", "") or "IDA tool",
                     "tool_call_id": message.tool_call_id,
+                    "status": str(getattr(message, "status", "success") or "success"),
                 }
             )
         else:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -17,7 +19,12 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import StreamWriter
 
 from vulnagent.agent.baseline_scan import BaselineScanner
-from vulnagent.agent.execution_limits import AgentExecutionLimits, SkippedToolCall, budget_stop_message
+from vulnagent.agent.execution_limits import (
+    AgentExecutionLimits,
+    SkippedToolCall,
+    _tool_signature,
+    budget_stop_message,
+)
 from vulnagent.agent.progress import ToolkitTaskProgressWriter
 from vulnagent.clients.async_ida_client import AsyncIdaClient
 from vulnagent.clients.ida_client import IdaClient
@@ -31,6 +38,71 @@ from vulnagent.tools.langgraph_write_tools import build_confirmed_write_tools
 ModelFactory = Callable[[RunnableConfig], BaseChatModel]
 
 
+_DSML_TOOL_BLOCK_RE = re.compile(
+    r"<[^>]*DSML[^>]*tool_calls[^>]*>(?P<body>.*?)</[^>]*DSML[^>]*tool_calls[^>]*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_INVOKE_RE = re.compile(
+    r"<[^>]*DSML[^>]*invoke\s+name=[\"'](?P<name>[^\"']+)[\"'][^>]*>"
+    r"(?P<body>.*?)</[^>]*DSML[^>]*invoke[^>]*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_PARAMETER_RE = re.compile(
+    r"<[^>]*DSML[^>]*parameter\s+name=[\"'](?P<name>[^\"']+)[\"'][^>]*>"
+    r"(?P<value>.*?)</[^>]*DSML[^>]*parameter[^>]*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _normalize_model_tool_calls(response: AIMessage) -> AIMessage:
+    """Convert DeepSeek's raw DSML tool syntax to LangChain tool calls.
+
+    Some OpenAI-compatible DeepSeek deployments return tool calls in the
+    response content instead of populating ``AIMessage.tool_calls``. LangGraph
+    only routes messages with the latter, so normalize this provider-specific
+    representation at the model boundary.
+    """
+    if response.tool_calls or not isinstance(response.content, str):
+        return response
+
+    match = _DSML_TOOL_BLOCK_RE.search(response.content)
+    if match is None:
+        return response
+
+    calls: list[dict[str, Any]] = []
+    for index, invoke in enumerate(_DSML_INVOKE_RE.finditer(match.group("body"))):
+        arguments: dict[str, Any] = {}
+        for parameter in _DSML_PARAMETER_RE.finditer(invoke.group("body")):
+            arguments[parameter.group("name")] = _coerce_dsml_value(parameter.group("value"))
+        name = invoke.group("name").strip()
+        if not name:
+            continue
+        calls.append(
+            {
+                "name": name,
+                "args": arguments,
+                "id": f"dsml_{index}_{name}",
+                "type": "tool_call",
+            }
+        )
+
+    if not calls:
+        return response
+
+    clean_content = _DSML_TOOL_BLOCK_RE.sub("", response.content).strip()
+    return response.model_copy(update={"content": clean_content, "tool_calls": calls})
+
+
+def _coerce_dsml_value(value: str) -> Any:
+    value = html.unescape(value).strip()
+    if not value:
+        return ""
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
 class BinaryVulnerabilityAgentState(MessagesState, total=False):
     report_id: str
     context_note: str
@@ -41,10 +113,53 @@ class BinaryVulnerabilityAgentState(MessagesState, total=False):
     scan_count: int
     taint_trace_count: int
     tool_signatures: list[str]
+    tool_failure_counts: dict[str, int]
     budget_stop_reason: str
     final_response_requested: bool
     scheduled_tool_calls: list[dict[str, Any]]
     skipped_tool_calls: list[dict[str, Any]]
+
+
+def _forced_final_response(
+    state: BinaryVulnerabilityAgentState,
+    reason: str,
+) -> str:
+    """Produce a useful deterministic closeout when the model keeps requesting tools."""
+    summaries: list[str] = []
+    for message in reversed(state.get("messages", [])):
+        if not isinstance(message, ToolMessage):
+            continue
+        name = message.name or "tool"
+        status = getattr(message, "status", "success") or "success"
+        summaries.append(f"- {name} [{status}]: {_compact_tool_text(message.content)}")
+        if len(summaries) >= 5:
+            break
+
+    lines = [
+        "Investigation paused before another tool call.",
+        f"Stop reason: {reason}",
+    ]
+    if summaries:
+        lines.extend(["Completed evidence:", *reversed(summaries)])
+    lines.extend(
+        [
+            "Next step:",
+            "Start a focused follow-up from the latest successful result; do not repeat failed or duplicate calls.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _compact_tool_text(content: Any, limit: int = 260) -> str:
+    text = str(content or "").strip()
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            text = str(payload.get("text") or payload.get("error") or text)
+    except json.JSONDecodeError:
+        pass
+    text = " ".join(text.split())
+    return text if len(text) <= limit else f"{text[:limit - 3]}..."
 
 
 def build_binary_vulnerability_agent(
@@ -134,11 +249,11 @@ Follow this playbook:
                 "budget_stop_reason": reason,
                 "messages": [AIMessage(content=budget_stop_message(reason))],
             }
+        if isinstance(response, AIMessage):
+            response = _normalize_model_tool_calls(response)
         if final_response_requested and isinstance(response, AIMessage) and response.tool_calls:
-            content = response.content or (
-                "Tool execution is closed for this turn. Based on the completed evidence, "
-                "no further tool calls will be made."
-            )
+            reason = state.get("budget_stop_reason") or "Tool execution is closed for this turn."
+            content = response.content or _forced_final_response(state, reason)
             response = AIMessage(content=content)
         return {"messages": [response]}
 
@@ -153,6 +268,7 @@ Follow this playbook:
             "scan_count": 0,
             "taint_trace_count": 0,
             "tool_signatures": [],
+            "tool_failure_counts": {},
             "budget_stop_reason": "",
             "final_response_requested": False,
             "scheduled_tool_calls": [],
@@ -174,6 +290,7 @@ Follow this playbook:
             scan_count=state["scan_count"],
             taint_trace_count=state.get("taint_trace_count", 0),
             tool_signatures=state["tool_signatures"],
+            tool_failure_counts=state.get("tool_failure_counts", {}),
         )
         skipped_messages = _skipped_tool_messages(decision.skipped_calls)
         return {
@@ -206,6 +323,7 @@ Follow this playbook:
             raise TypeError(f"Expected AIMessage, got {type(last_message)}")
 
         results: list[ToolMessage] = []
+        failed_signatures: list[str] = []
         scheduled_by_id = {
             tool_call["id"]: tool_call for tool_call in state.get("scheduled_tool_calls", [])
         }
@@ -233,6 +351,7 @@ Follow this playbook:
                 continue
             tool = tools_by_name.get(tool_name)
             if tool is None:
+                failed_signatures.append(_tool_signature(tool_call))
                 results.append(
                     ToolMessage(
                         content=f"Unknown tool: {tool_name}",
@@ -245,6 +364,7 @@ Follow this playbook:
 
             remaining = limits.remaining_seconds(state["execution_started_at"])
             if remaining <= 0:
+                failed_signatures.append(_tool_signature(tool_call))
                 results.append(
                     ToolMessage(
                         content="Tool execution skipped: per-turn execution time limit reached.",
@@ -259,7 +379,7 @@ Follow this playbook:
                     tool.ainvoke(tool_call, config=config),
                     timeout=min(limits.tool_timeout_seconds, remaining),
                 )
-                results.append(
+                tool_message = (
                     result
                     if isinstance(result, ToolMessage)
                     else ToolMessage(
@@ -268,7 +388,11 @@ Follow this playbook:
                         tool_call_id=tool_call["id"],
                     )
                 )
+                if tool_message.status == "error":
+                    failed_signatures.append(_tool_signature(tool_call))
+                results.append(tool_message)
             except (TimeoutError, asyncio.TimeoutError):
+                failed_signatures.append(_tool_signature(tool_call))
                 results.append(
                     ToolMessage(
                         content=(
@@ -281,6 +405,7 @@ Follow this playbook:
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - return tool failures to the model
+                failed_signatures.append(_tool_signature(tool_call))
                 results.append(
                     ToolMessage(
                         content=f"{type(exc).__name__}: {exc}",
@@ -289,7 +414,20 @@ Follow this playbook:
                         status="error",
                     )
                 )
-        return {"messages": results}
+        if not failed_signatures:
+            return {"messages": results}
+        failures = dict(state.get("tool_failure_counts", {}))
+        for signature in failed_signatures:
+            failures[signature] = failures.get(signature, 0) + 1
+        return {
+            "messages": results,
+            "tool_signatures": [
+                signature
+                for signature in state.get("tool_signatures", [])
+                if signature not in failed_signatures
+            ],
+            "tool_failure_counts": failures,
+        }
 
     async def baseline_scan(
         state: BinaryVulnerabilityAgentState,

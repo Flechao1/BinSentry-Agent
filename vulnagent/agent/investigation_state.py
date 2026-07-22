@@ -8,6 +8,7 @@ MAX_ROUTES = 50
 MAX_SOURCES = 30
 MAX_SINKS = 30
 MAX_FINDINGS = 30
+MAX_CANDIDATES = 50
 MAX_QUESTIONS = 30
 MAX_FUNCTIONS = 80
 MAX_FUNCTION_NOTES = 80
@@ -33,6 +34,19 @@ class PendingSink(BaseModel):
     reason: str = ""
 
 
+class CandidateFindingState(BaseModel):
+    candidate_id: str
+    status: str = "pending"
+    category: str = "unknown"
+    sink_name: str = ""
+    sink_ea: str = ""
+    caller_name: str = ""
+    caller_ea: str = ""
+    confidence: float = 0.0
+    conclusion: str = ""
+    missing_evidence: list[str] = Field(default_factory=list)
+
+
 class InvestigationState(BaseModel):
     """Structured short-term state injected into each Agent model call."""
 
@@ -42,6 +56,7 @@ class InvestigationState(BaseModel):
     source_candidates: list[str] = Field(default_factory=list)
     confirmed_sources: list[str] = Field(default_factory=list)
     pending_sinks: list[PendingSink] = Field(default_factory=list)
+    candidate_findings: list[CandidateFindingState] = Field(default_factory=list)
     indirect_call_sites: list[str] = Field(default_factory=list)
     missing_evidence: list[str] = Field(default_factory=list)
     verified_findings: list[str] = Field(default_factory=list)
@@ -83,6 +98,16 @@ class InvestigationState(BaseModel):
         }:
             self.pending_sinks.append(sink)
         self.pending_sinks = self.pending_sinks[-MAX_SINKS:]
+
+    def add_candidate_finding(self, candidate: CandidateFindingState) -> None:
+        candidate = _compact_candidate(candidate)
+        for index, existing in enumerate(self.candidate_findings):
+            if existing.candidate_id == candidate.candidate_id:
+                self.candidate_findings[index] = candidate
+                break
+        else:
+            self.candidate_findings.append(candidate)
+        self.candidate_findings = self.candidate_findings[-MAX_CANDIDATES:]
 
     def add_missing_evidence(self, question: str) -> None:
         _append_unique(self.missing_evidence, question, MAX_QUESTIONS)
@@ -129,6 +154,10 @@ class InvestigationState(BaseModel):
         self.pending_sinks = [
             _compact_sink(sink) for sink in self.pending_sinks[-MAX_SINKS:]
         ]
+        self.candidate_findings = [
+            _compact_candidate(candidate)
+            for candidate in self.candidate_findings[-MAX_CANDIDATES:]
+        ]
         self.indirect_call_sites = _bounded_unique(
             self.indirect_call_sites,
             MAX_INDIRECT_CALLS,
@@ -170,8 +199,49 @@ def merge_report_into_investigation_state(state: InvestigationState, report: Any
         )
     for candidate in report.source_candidates:
         state.add_source_candidate(candidate.name)
+    report_candidates = {
+        candidate.candidate_id: candidate
+        for candidate in getattr(report, "candidate_findings", [])
+    }
+    for candidate in report_candidates.values():
+        state.add_candidate_finding(
+            CandidateFindingState(
+                candidate_id=candidate.candidate_id,
+                status=candidate.status,
+                category=candidate.category,
+                sink_name=candidate.sink_name,
+                sink_ea=candidate.sink_ea,
+                caller_name=candidate.caller_name,
+                caller_ea=candidate.caller_ea,
+                confidence=candidate.confidence,
+                conclusion=candidate.conclusion,
+                missing_evidence=candidate.missing_evidence,
+            )
+        )
+        for question in candidate.missing_evidence:
+            state.add_missing_evidence(question)
     for finding in report.findings:
         sink = finding.sink
+        candidate_id = f"{sink.sink_name}:{sink.caller_addr}:{sink.loc}".lower()
+        if candidate_id not in report_candidates:
+            # Reports created before Candidate Finding support retain the prior state shape.
+            state.add_candidate_finding(
+                CandidateFindingState(
+                    candidate_id=candidate_id,
+                    status=finding.verification_status,
+                    category=finding.category,
+                    sink_name=sink.sink_name,
+                    sink_ea=sink.loc,
+                    caller_name=sink.caller_name,
+                    caller_ea=sink.caller_addr,
+                    confidence=finding.confidence,
+                    conclusion=(
+                        finding.evidence[0]
+                        if finding.evidence
+                        else finding.verification_status
+                    ),
+                )
+            )
         state.add_pending_sink(
             PendingSink(
                 sink_name=sink.sink_name,
@@ -232,6 +302,21 @@ def _compact_sink(sink: PendingSink) -> PendingSink:
         caller_ea=_clip(sink.caller_ea),
         category=_clip(sink.category),
         reason=_clip(sink.reason),
+    )
+
+
+def _compact_candidate(candidate: CandidateFindingState) -> CandidateFindingState:
+    return CandidateFindingState(
+        candidate_id=_clip(candidate.candidate_id),
+        status=_clip(candidate.status),
+        category=_clip(candidate.category),
+        sink_name=_clip(candidate.sink_name),
+        sink_ea=_clip(candidate.sink_ea),
+        caller_name=_clip(candidate.caller_name),
+        caller_ea=_clip(candidate.caller_ea),
+        confidence=max(0.0, min(float(candidate.confidence), 1.0)),
+        conclusion=_clip(candidate.conclusion),
+        missing_evidence=_bounded_unique(candidate.missing_evidence, MAX_QUESTIONS),
     )
 
 

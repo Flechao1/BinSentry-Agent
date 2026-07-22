@@ -13,6 +13,12 @@ from vulnagent.harness import (
     HarnessBaselineScanRequest,
     HarnessTurnRequest,
 )
+from vulnagent.firmware.scanner import (
+    FirmwareFilesystemScanner,
+    attach_ida_backend_commands,
+    _format_table,
+)
+from vulnagent.intel import IntelQuery, VulnerabilityIntelService
 from vulnagent.storage import SqliteVulnRepository
 
 
@@ -36,6 +42,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "api":
         _api(args)
+        return
+    if args.command in {"scan-firmware", "triage-firmware"}:
+        _scan_firmware(args)
+        return
+    if args.command == "intel":
+        _intel(args)
         return
     parser.print_help()
 
@@ -65,7 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--source-min-score", type=float, default=25.0)
     scan.add_argument("--sink-max-depth", type=int, default=8)
     scan.add_argument("--sink-max-functions", type=int, default=500)
-    scan.add_argument("--taint-max-depth", type=int, default=20)
+    scan.add_argument(
+        "--validation-max-candidates",
+        type=int,
+        default=8,
+        help="Maximum high-priority sink candidates to validate automatically",
+    )
     scan.add_argument("--max-findings", type=int, default=100)
     scan.add_argument("--json", action="store_true", help="Print structured JSON result")
 
@@ -84,7 +101,51 @@ def build_parser() -> argparse.ArgumentParser:
     api.add_argument("--port", type=int, default=8787)
     api.add_argument("--reload", action="store_true")
 
+    firmware = subparsers.add_parser(
+        "scan-firmware",
+        help="Scan an extracted firmware filesystem and rank binaries for IDA analysis",
+    )
+    _add_firmware_args(firmware)
+
+    triage = subparsers.add_parser(
+        "triage-firmware",
+        help="Scan firmware and print suggested IDA backend startup commands",
+    )
+    _add_firmware_args(triage)
+    triage.set_defaults(show_ida_commands=True)
+
+    intel = subparsers.add_parser(
+        "intel",
+        help="Search CVE/GitHub intelligence for known vulnerability matches",
+    )
+    intel.add_argument("--vendor", default="")
+    intel.add_argument("--product", default="")
+    intel.add_argument("--firmware-version", default="")
+    intel.add_argument("--component", default="")
+    intel.add_argument("--vuln-type", default="")
+    intel.add_argument("--route", default="")
+    intel.add_argument("--sink", default="")
+    intel.add_argument("--symbols", default="", help="Comma-separated function or symbol names")
+    intel.add_argument("--keywords", default="", help="Comma-separated additional keywords")
+    intel.add_argument(
+        "--sources",
+        default="cveorg,nvd,github",
+        help="Comma-separated sources: cveorg,nvd,github",
+    )
+    intel.add_argument("--limit", type=int, default=10)
+    intel.add_argument("--json", action="store_true")
+
     return parser
+
+
+def _add_firmware_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("root", help="Extracted firmware filesystem directory, e.g. squashfs-root")
+    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--json", action="store_true", help="Print structured JSON result")
+    parser.add_argument("--show-ida-commands", action="store_true")
+    parser.add_argument("--host", default="127.0.0.1", help="Host for suggested IDA backend command")
+    parser.add_argument("--port", type=int, default=8765, help="Port for suggested IDA backend command")
+    parser.add_argument("--writable", action="store_true", help="Generate writable backend command")
 
 
 def _add_harness_common_args(parser: argparse.ArgumentParser) -> None:
@@ -129,7 +190,7 @@ async def _scan(args: argparse.Namespace) -> None:
                 source_min_score=args.source_min_score,
                 sink_max_depth=args.sink_max_depth,
                 sink_max_functions=args.sink_max_functions,
-                taint_max_depth=args.taint_max_depth,
+                validation_max_candidates=args.validation_max_candidates,
                 max_findings=args.max_findings,
             ),
         )
@@ -204,6 +265,49 @@ def _api(args: argparse.Namespace) -> None:
     )
 
 
+def _scan_firmware(args: argparse.Namespace) -> None:
+    report = FirmwareFilesystemScanner(args.root).scan(limit=args.limit)
+    attach_ida_backend_commands(
+        report,
+        host=args.host,
+        port=args.port,
+        read_only=not args.writable,
+    )
+    if args.json:
+        print(report.to_json())
+        return
+    print(_format_table(report, show_ida_commands=args.show_ida_commands))
+
+
+def _intel(args: argparse.Namespace) -> None:
+    query = IntelQuery(
+        vendor=args.vendor,
+        product=args.product,
+        firmware_version=args.firmware_version,
+        component=args.component,
+        vulnerability_type=args.vuln_type,
+        route=args.route,
+        sink=args.sink,
+        symbols=_split_csv(args.symbols),
+        keywords=_split_csv(args.keywords),
+        max_results=args.limit,
+    )
+    result = VulnerabilityIntelService().search(query, sources=_split_csv(args.sources))
+    if args.json:
+        print(result.model_dump_json(indent=2))
+        return
+    print(f"Assessment: {result.assessment}")
+    if result.errors:
+        print(f"Errors: {'; '.join(result.errors)}")
+    if not result.matches:
+        print("No strong public intelligence match found.")
+        return
+    for match in result.matches:
+        ref = match.reference
+        print(f"{match.score:3d} {match.confidence:6s} {ref.source:6s} {ref.identifier} {ref.url}")
+        print(f"    reasons: {'; '.join(match.reasons)}")
+
+
 def _repository(args: argparse.Namespace) -> SqliteVulnRepository:
     return SqliteVulnRepository(args.db_path) if args.db_path else SqliteVulnRepository.from_env()
 
@@ -242,3 +346,7 @@ def _print_result(result: Any, *, as_json: bool) -> None:
         ]
         print("\nTrace:")
         print(json.dumps(trace_summary, ensure_ascii=False, indent=2, default=str))
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]

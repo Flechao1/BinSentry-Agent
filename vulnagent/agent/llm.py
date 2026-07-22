@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from threading import Lock
 
 from dotenv import load_dotenv
 from pydantic import SecretStr
 
 
 load_dotenv()
+
+_runtime_settings: "LlmSettings | None" = None
+_runtime_settings_lock = Lock()
 
 
 def _configured_secret(name: str) -> str:
@@ -59,10 +63,31 @@ class LlmSettings:
         raise ValueError("Configure DEEPSEEK_API_KEY or OPENAI_API_KEY to enable the LLM Agent.")
 
 
+def get_active_llm_settings() -> LlmSettings:
+    """Return the process override when configured, otherwise load .env settings."""
+    with _runtime_settings_lock:
+        if _runtime_settings is not None:
+            return _runtime_settings
+    return LlmSettings.from_env()
+
+
+def set_runtime_llm_settings(settings: LlmSettings) -> LlmSettings:
+    global _runtime_settings
+    with _runtime_settings_lock:
+        _runtime_settings = settings
+    return settings
+
+
+def reset_runtime_llm_settings() -> None:
+    global _runtime_settings
+    with _runtime_settings_lock:
+        _runtime_settings = None
+
+
 def get_llm_status() -> dict[str, str | bool]:
     """Return frontend-safe model configuration without exposing credentials."""
     try:
-        settings = LlmSettings.from_env()
+        settings = get_active_llm_settings()
     except ValueError as exc:
         return {"configured": False, "error": str(exc)}
     return {
@@ -70,6 +95,9 @@ def get_llm_status() -> dict[str, str | bool]:
         "provider": settings.provider,
         "model": settings.model,
         "base_url": settings.base_url or "default",
+        "temperature": settings.temperature,
+        "max_tokens": settings.max_tokens,
+        "api_key_configured": bool(settings.api_key),
     }
 
 
@@ -77,7 +105,7 @@ def build_chat_model(settings: LlmSettings | None = None):
     """Build a LangChain chat model for DeepSeek or another OpenAI-compatible API."""
     from langchain_openai import ChatOpenAI
 
-    resolved = settings or LlmSettings.from_env()
+    resolved = settings or get_active_llm_settings()
     return ChatOpenAI(
         model=resolved.model,
         api_key=SecretStr(resolved.api_key),

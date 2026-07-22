@@ -1,8 +1,11 @@
 data/
 reports/
+dataset/
 .env
 *.env
 .vscode/
+notebook
+notebookforagent.md
 __pycache__/
 *.py[cod]
 .ruff_cache/
@@ -23,3 +26,6 @@ __pycache__/
 node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/*-check.png
+frontend/reference-layout*.png
+frontend/ui-overview-check.png

@@ -185,6 +185,22 @@ python -m compileall -q vulnagent
 python -m unittest vulnagent.tests.test_vulnerability_workflow
 ```
 
+## Agent Chat 上下文压缩
+
+在 Agent Chat 输入框中手动输入：
+
+```text
+/context press
+```
+
+系统会把当前会话中较早的消息压缩为短期记忆摘要，并只保留最近几轮完整对话继续分析。压缩结果会写入 SQLite，并生成一条 Harness Run / Trace 记录，方便后续查看。
+
+可通过 `.env` 调整手动压缩时保留的最近轮数：
+
+```env
+VULN_CONTEXT_PRESS_KEEP_RECENT_TURNS=2
+```
+
 ## 代码仓库注意事项
 
 本项目已通过 `.gitignore` 忽略以下本地文件：

@@ -228,6 +228,7 @@ class SinkCallResult(BaseModel):
     caller_addr: str
     caller_name: str
     sink_name: str
+    callee_ea: str = ""
     category: str = "unknown"
     confidence: float = 0.5
     args: list[dict] = Field(default_factory=list)

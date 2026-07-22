@@ -425,6 +425,28 @@ class SqliteVulnRepository:
             ).fetchone()
         return dict(row) if row else None
 
+    def rename_chat_thread(self, thread_id: str, title: str) -> dict[str, Any] | None:
+        title = str(title).strip().replace("\n", " ")[:72]
+        if not title:
+            raise ValueError("Chat title cannot be empty")
+        now = _utc_now()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE chat_threads
+                SET title = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (title, now, thread_id),
+            )
+        return self.get_chat_thread(thread_id) if cursor.rowcount else None
+
+    def delete_chat_thread(self, thread_id: str) -> bool:
+        """Delete one conversation and its state while retaining detached run audit records."""
+        with self._connection() as connection:
+            cursor = connection.execute("DELETE FROM chat_threads WHERE id = ?", (thread_id,))
+        return bool(cursor.rowcount)
+
     def save_chat_messages(self, thread_id: str, messages: Sequence[Any]) -> None:
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, message_to_dict
 
@@ -432,7 +454,7 @@ class SqliteVulnRepository:
             raise ValueError(f"Unknown chat thread: {thread_id}")
 
         pending_tool_calls: dict[str, tuple[str, Any]] = {}
-        tool_events: list[tuple[str, str, Any, Any]] = []
+        tool_events: list[tuple[str, str, Any, Any, str]] = []
         title = "New investigation"
         now = _utc_now()
         with self._connection() as connection:
@@ -468,7 +490,15 @@ class SqliteVulnRepository:
                         call_id,
                         (getattr(message, "name", "") or "unknown", {}),
                     )
-                    tool_events.append((call_id, name, tool_input, message.content))
+                    tool_events.append(
+                        (
+                            call_id,
+                            name,
+                            tool_input,
+                            message.content,
+                            str(getattr(message, "status", "success") or "success"),
+                        )
+                    )
 
             connection.execute(
                 """
@@ -482,14 +512,14 @@ class SqliteVulnRepository:
                 """,
                 (title, now, thread_id),
             )
-            for call_id, name, tool_input, output in tool_events:
+            for call_id, name, tool_input, output, status in tool_events:
                 connection.execute(
                     """
                     INSERT INTO tool_events(
                         id, thread_id, tool_call_id, tool_name,
                         input_json, output_json, status, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, 'complete', ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         uuid4().hex,
@@ -498,6 +528,7 @@ class SqliteVulnRepository:
                         name,
                         _json_dumps(tool_input),
                         _json_dumps(output),
+                        status,
                         now,
                     ),
                 )

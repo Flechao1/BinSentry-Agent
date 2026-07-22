@@ -10,7 +10,12 @@ from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
-from vulnagent.agent.investigation_state import ConfirmedRoute, InvestigationState, PendingSink
+from vulnagent.agent.investigation_state import (
+    CandidateFindingState,
+    ConfirmedRoute,
+    InvestigationState,
+    PendingSink,
+)
 from vulnagent.storage import SqliteVulnRepository
 
 CHARS_PER_TOKEN = 4
@@ -108,6 +113,16 @@ class PreparedContext:
     summarized_until_sequence: int
 
 
+@dataclass(frozen=True)
+class ContextCompressionResult:
+    messages: list[BaseMessage]
+    summary: str
+    original_message_count: int
+    retained_message_count: int
+    summarized_message_count: int
+    summary_chars: int
+
+
 class ContextBuilder:
     """Build a bounded LLM context while preserving full messages in SQLite."""
 
@@ -155,6 +170,42 @@ class ContextBuilder:
     def record(self, thread_id: str, messages: list[BaseMessage]) -> None:
         """Persist derived state after a completed tool loop."""
         self._update_investigation_state(thread_id, sanitize_provider_message_order(messages))
+
+    def compress(
+        self,
+        thread_id: str,
+        messages: list[BaseMessage],
+        *,
+        keep_recent_turns: int = 2,
+    ) -> ContextCompressionResult:
+        """Summarize older turns and return the retained recent history."""
+        messages = sanitize_provider_message_order(messages)
+        self._update_investigation_state(thread_id, messages)
+        recent_start = _recent_turn_start(messages, max(0, keep_recent_turns))
+        existing = self.repository.get_chat_summary(thread_id)
+        existing_summary = existing["summary"] if existing else ""
+        additions = messages[:recent_start]
+        addition_text = "\n".join(_summarize_message(message) for message in additions)
+        summary = self._merge_summary(existing_summary, addition_text)
+        summary = _keep_recent_text(
+            summary,
+            self.budget.summary_tokens * CHARS_PER_TOKEN,
+            marker="[Earlier investigation summary truncated]\n",
+        )
+        self.repository.save_chat_summary(
+            thread_id,
+            summary,
+            summarized_until_sequence=-1,
+        )
+        retained = messages[recent_start:]
+        return ContextCompressionResult(
+            messages=retained,
+            summary=summary,
+            original_message_count=len(messages),
+            retained_message_count=len(retained),
+            summarized_message_count=len(additions),
+            summary_chars=len(summary),
+        )
 
     def _update_summary(
         self,
@@ -369,10 +420,12 @@ def _apply_tool_call(state: InvestigationState, name: str, args: dict[str, Any])
         "scan_dangerous_sink_calls": "scan_sinks",
         "trace_taint_call_chain": "trace_taint",
         "trace_argument_origin": "trace_taint",
+        "validate_sink_candidate": "validate_candidate",
         "get_function_context": "inspect_function",
         "get_function_signals": "inspect_function",
         "decompile_function": "inspect_function",
         "get_function_xrefs": "inspect_function",
+        "get_address_xrefs": "inspect_data",
     }
     if name in phase_by_tool:
         state.phase = phase_by_tool[name]
@@ -548,6 +601,30 @@ def _apply_structured_tool_result(
                 )
             )
 
+    for candidate in _as_list(payload.get("candidate_findings")):
+        if not isinstance(candidate, dict):
+            continue
+        state_candidate = CandidateFindingState(
+            candidate_id=str(candidate.get("candidate_id") or ""),
+            status=str(candidate.get("status") or "pending"),
+            category=str(candidate.get("category") or "unknown"),
+            sink_name=str(candidate.get("sink_name") or ""),
+            sink_ea=str(candidate.get("sink_ea") or ""),
+            caller_name=str(candidate.get("caller_name") or ""),
+            caller_ea=str(candidate.get("caller_ea") or ""),
+            confidence=float(candidate.get("confidence") or 0.0),
+            conclusion=str(candidate.get("conclusion") or ""),
+            missing_evidence=[str(item) for item in _as_list(candidate.get("missing_evidence"))],
+        )
+        if state_candidate.candidate_id:
+            state.add_candidate_finding(state_candidate)
+            if state_candidate.status == "verified":
+                state.resolve_sink(state_candidate.sink_ea, state_candidate.caller_ea)
+                state.add_verified_finding(
+                    f"{state_candidate.caller_name} -> {state_candidate.sink_name} "
+                    f"{state_candidate.sink_ea}".strip()
+                )
+
     for finding in _as_list(payload.get("verified_findings")):
         state.add_verified_finding(_finding_text(finding))
 
@@ -592,6 +669,7 @@ def _parse_tool_json(result: str) -> dict[str, Any] | None:
             "missing_evidence",
             "function_notes",
             "verified_findings",
+            "candidate_findings",
             "indirect_call_sites",
         }
     ):

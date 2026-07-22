@@ -31,6 +31,7 @@ FOCUSED_ANALYSIS_TOOLS = {
 TAINT_TRACE_TOOLS = {
     "trace_taint_call_chain",
     "trace_argument_origin",
+    "validate_sink_candidate",
 }
 SCAN_TOOLS = DISCOVERY_SCAN_TOOLS | FOCUSED_ANALYSIS_TOOLS | TAINT_TRACE_TOOLS
 HEAVY_TOOLS = DECOMPILE_TOOLS | DISCOVERY_SCAN_TOOLS | TAINT_TRACE_TOOLS
@@ -62,11 +63,11 @@ class AgentExecutionLimits:
     max_tool_loops: int = 24
     max_tool_calls_per_batch: int = 8
     max_decompile_calls: int = 20
-    max_decompile_calls_per_batch: int = 1
+    max_decompile_calls_per_batch: int = 4
     max_scan_calls: int = 16
-    max_scan_calls_per_batch: int = 1
+    max_scan_calls_per_batch: int = 4
     max_taint_trace_calls: int = 16
-    max_taint_trace_calls_per_batch: int = 2
+    max_taint_trace_calls_per_batch: int = 4
     max_turn_seconds: float = 300.0
     tool_timeout_seconds: float = 60.0
     model_timeout_seconds: float = 90.0
@@ -79,13 +80,13 @@ class AgentExecutionLimits:
             max_tool_calls_per_batch=int(os.getenv("VULN_AGENT_MAX_TOOL_CALLS_PER_BATCH", "8")),
             max_decompile_calls=int(os.getenv("VULN_AGENT_MAX_DECOMPILE_CALLS", "20")),
             max_decompile_calls_per_batch=int(
-                os.getenv("VULN_AGENT_MAX_DECOMPILE_CALLS_PER_BATCH", "1")
+                os.getenv("VULN_AGENT_MAX_DECOMPILE_CALLS_PER_BATCH", "4")
             ),
             max_scan_calls=int(os.getenv("VULN_AGENT_MAX_SCAN_CALLS", "16")),
-            max_scan_calls_per_batch=int(os.getenv("VULN_AGENT_MAX_SCAN_CALLS_PER_BATCH", "1")),
+            max_scan_calls_per_batch=int(os.getenv("VULN_AGENT_MAX_SCAN_CALLS_PER_BATCH", "4")),
             max_taint_trace_calls=int(os.getenv("VULN_AGENT_MAX_TAINT_TRACE_CALLS", "16")),
             max_taint_trace_calls_per_batch=int(
-                os.getenv("VULN_AGENT_MAX_TAINT_TRACE_CALLS_PER_BATCH", "2")
+                os.getenv("VULN_AGENT_MAX_TAINT_TRACE_CALLS_PER_BATCH", "4")
             ),
             max_turn_seconds=float(os.getenv("VULN_AGENT_MAX_TURN_SECONDS", "300")),
             tool_timeout_seconds=float(os.getenv("VULN_AGENT_TOOL_TIMEOUT_SECONDS", "60")),
@@ -106,6 +107,7 @@ class AgentExecutionLimits:
         scan_count: int,
         tool_signatures: list[str],
         taint_trace_count: int = 0,
+        tool_failure_counts: dict[str, int] | None = None,
     ) -> ToolSchedulingDecision:
         """Split tool calls into allowed and skipped calls without guessing user intent."""
         if self.remaining_seconds(started_at) <= 0:
@@ -127,6 +129,7 @@ class AgentExecutionLimits:
         batch_decompile = 0
         batch_scans = 0
         batch_taint_traces = 0
+        failures = tool_failure_counts or {}
 
         for tool_call in tool_calls:
             name = str(tool_call.get("name", "unknown"))
@@ -134,6 +137,8 @@ class AgentExecutionLimits:
             reason = ""
             if signature in tool_signatures or signature in seen_batch_signatures:
                 reason = f"Duplicate tool call skipped: {signature}"
+            elif failures.get(signature, 0) >= 2:
+                reason = f"Tool retry limit reached after repeated failures: {signature}"
             elif next_tool_calls >= self.max_tool_calls:
                 reason = f"Tool call limit reached ({self.max_tool_calls})."
             elif len(allowed) >= self.max_tool_calls_per_batch:
@@ -180,7 +185,9 @@ class AgentExecutionLimits:
         return ToolSchedulingDecision(
             allowed_calls=allowed,
             skipped_calls=skipped,
-            request_final_answer=bool(skipped),
+            # A partially admitted batch must be allowed to continue. The model
+            # should only be forced to answer when no requested tool can run.
+            request_final_answer=bool(skipped) and not allowed,
             updates={
             "tool_call_count": next_tool_calls,
             "tool_loop_count": tool_loop_count + 1,
@@ -206,6 +213,7 @@ class AgentExecutionLimits:
         scan_count: int,
         tool_signatures: list[str],
         taint_trace_count: int = 0,
+        tool_failure_counts: dict[str, int] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Compatibility wrapper. Prefer schedule()."""
         decision = self.schedule(
@@ -217,6 +225,7 @@ class AgentExecutionLimits:
             scan_count=scan_count,
             taint_trace_count=taint_trace_count,
             tool_signatures=tool_signatures,
+            tool_failure_counts=tool_failure_counts,
         )
         if decision.skipped_calls and not decision.allowed_calls:
             return decision.skipped_calls[0].reason, {}

@@ -217,6 +217,24 @@ class IdalibBackend(IdaBackend):
                     from_records.append(record)
         return {"to": to_records, "from": from_records}
 
+    def get_address_xrefs(self, ea: int) -> dict[str, list[XrefRecord]]:
+        """Return direct xrefs for a code or data address without requiring a function."""
+        self.open()
+        idautils = self._ida["idautils"]
+        address = parse_address(ea)
+        return {
+            "to": [
+                self._xref_record(xref)
+                for xref in idautils.XrefsTo(address)
+                if self._is_interesting_xref(xref)
+            ],
+            "from": [
+                self._xref_record(xref)
+                for xref in idautils.XrefsFrom(address)
+                if self._is_interesting_xref(xref)
+            ],
+        }
+
     def get_function_calls(self, ea: int) -> list[CallRecord]:
         self.open()
         func = self._require_func(ea)
@@ -653,6 +671,8 @@ class IdalibBackend(IdaBackend):
             cfunc = ida_hexrays.decompile(start_ea)
         except Exception:
             return []
+        if not cfunc:
+            return []
 
         caller_name = self._func_name(start_ea)
         visitor = _SinkCallVisitor(
@@ -669,6 +689,7 @@ class IdalibBackend(IdaBackend):
                 caller_addr=format_address(start_ea),
                 caller_name=caller_name,
                 sink_name=r["sink_name"],
+                callee_ea=r.get("callee_ea", ""),
                 category=r.get("category", "unknown"),
                 confidence=r.get("confidence", 0.5),
                 args=r["args"],
@@ -1702,9 +1723,10 @@ class _SinkCallCtreeVisitor:
         if expr.op != _idaapi.cot_call:
             return 0
 
-        callee_name = self._resolve_callee_name(expr.x)
-        if not callee_name:
+        callee = self._resolve_callee(expr.x)
+        if callee is None:
             return 0
+        callee_name, callee_ea = callee
 
         specs = self.sink_specs.get(callee_name)
         if not specs:
@@ -1744,6 +1766,7 @@ class _SinkCallCtreeVisitor:
         self.results.append({
             "loc": loc,
             "sink_name": callee_name,
+            "callee_ea": callee_ea,
             "category": "unknown",
             "confidence": 0.5,
             "args": args,
@@ -1751,7 +1774,7 @@ class _SinkCallCtreeVisitor:
         })
         return 0
 
-    def _resolve_callee_name(self, callee_expr: Any) -> str | None:
+    def _resolve_callee(self, callee_expr: Any) -> tuple[str, str] | None:
         import idaapi as _idaapi  # type: ignore
 
         inner = callee_expr
@@ -1761,14 +1784,16 @@ class _SinkCallCtreeVisitor:
         ida_name = self._ida["ida_name"]
         if inner.op == _idaapi.cot_obj:
             name = ida_name.get_name(inner.obj_ea)
+            callee_ea = format_address(int(inner.obj_ea))
         elif inner.op == _idaapi.cot_helper:
             name = inner.helper
+            callee_ea = ""
         else:
             return None
 
         if not name:
             return None
-        return _normalize_func_name(name)
+        return _normalize_func_name(name), callee_ea
 
     def _classify_arg(self, expr: Any) -> str:
         import idaapi as _idaapi  # type: ignore

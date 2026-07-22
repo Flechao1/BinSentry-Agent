@@ -10,7 +10,7 @@ from langchain_core.messages import BaseMessage, HumanMessage
 
 from vulnagent.agent.context_builder import ContextBuilder, sanitize_provider_message_order
 from vulnagent.agent.langgraph_agent import build_binary_vulnerability_agent
-from vulnagent.agent.llm import LlmSettings, build_chat_model
+from vulnagent.agent.llm import LlmSettings, build_chat_model, get_active_llm_settings
 from vulnagent.storage import SqliteVulnRepository
 
 
@@ -31,7 +31,7 @@ class StandaloneBinaryVulnerabilityAgent:
         repository: SqliteVulnRepository | None = None,
         context_builder: ContextBuilder | None = None,
     ) -> None:
-        self.llm_settings = llm_settings or LlmSettings.from_env()
+        self.llm_settings = llm_settings or get_active_llm_settings()
         self.ida_backend_url = ida_backend_url or os.getenv(
             "IDA_BACKEND_URL",
             "http://127.0.0.1:8765",

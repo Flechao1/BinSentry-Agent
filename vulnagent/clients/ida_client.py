@@ -146,6 +146,14 @@ class IdaClient:
             "from": [XrefRecord.model_validate(record) for record in payload.get("from", [])],
         }
 
+    def get_address_xrefs(self, ea: int | str) -> dict[str, list[XrefRecord]]:
+        address = normalize_ea(ea)
+        payload = self._request_object("GET", f"/addresses/{address}/xrefs")
+        return {
+            "to": [XrefRecord.model_validate(record) for record in payload.get("to", [])],
+            "from": [XrefRecord.model_validate(record) for record in payload.get("from", [])],
+        }
+
     def get_function_calls(self, ea: int | str) -> list[CallRecord]:
         address = normalize_ea(ea)
         payload = self._request_list("GET", f"/functions/{address}/calls")

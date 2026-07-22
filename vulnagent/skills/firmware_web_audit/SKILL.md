@@ -8,6 +8,9 @@ truth. Use language-model reasoning to prioritize investigation and explain evid
 
 ## Required Baseline
 
+0. If the user provides an extracted firmware filesystem directory rather than an
+   already loaded IDA sample, call `scan_firmware_filesystem` first to identify the
+   primary Web/CGI binaries worth importing into IDA.
 1. Check the IDA backend and active database.
 2. Detect architecture and enumerate imports.
 3. Find route handlers and likely user-input getter functions.
@@ -17,6 +20,16 @@ truth. Use language-model reasoning to prioritize investigation and explain evid
 
 ## Tool Selection
 
+- Use `scan_firmware_filesystem` when the user asks which firmware filesystem binary
+  should be analyzed, or provides a directory such as `squashfs-root`, `rootfs`, or an
+  extracted firmware path. Treat its output as attack-surface triage: recommend top
+  candidates for IDA import and include the suggested `ida_backend_command` for the
+  best candidates. Do not claim source-to-sink vulnerabilities from filesystem
+  evidence alone.
+- After filesystem triage, ask the user to choose one recommended binary or to start
+  the suggested IDA backend command before using IDA-specific tools. Do not call
+  decompile, source scan, sink scan, or taint trace tools until an IDA backend is
+  connected to the selected binary.
 - Treat `find_web_route_handlers` as an optional heuristic baseline for registered
   routes, URL paths, and endpoints. Its output is not exhaustive. For complete
   route investigation, continue with imports, function search, xrefs,
@@ -28,11 +41,18 @@ truth. Use language-model reasoning to prioritize investigation and explain evid
   edges until targets are resolved by follow-up evidence.
 - Use `get_function_signals` before `get_function_context` or
   `decompile_function` when calls, imports, strings, or constants are enough.
+- Function-oriented tools accept a function address or an exact function name. Use
+  `get_address_xrefs`, not `get_function_xrefs`, for globals, strings, tables, or
+  any address that is not confirmed to be a function entry.
 - Request at most one pseudocode/decompile tool call in a single tool batch. If
   multiple functions need inspection, inspect them one at a time and summarize why the
   next function is necessary.
 - Use `find_function_sink_calls` for a known function. Reserve
   `scan_dangerous_sink_calls` for bounded multi-function discovery.
+- After discovering a non-constant command or memory sink, use
+  `validate_sink_candidate` before claiming a vulnerability. This creates a
+  per-sink candidate verdict by tracing the relevant arguments. Do not replace
+  this with a broad pseudocode review when the caller and callsite are known.
 - Use `analyze_function_as_source` for a known candidate. Reserve
   `scan_taint_source_candidates` for bounded discovery.
 - When the user asks only to scan or classify user-input sources, call
@@ -48,8 +68,10 @@ truth. Use language-model reasoning to prioritize investigation and explain evid
 ## Evidence Rules
 
 - A dangerous imported function alone is not a verified vulnerability.
-- Mark a finding `verified` only when a source-to-sink chain is supported by tool
-  evidence.
+- Mark a finding `verified` only when `validate_sink_candidate` reports a verified
+  remote-input command-execution path, or deterministic source-to-sink evidence
+  independently proves the vulnerability. Memory-operation candidates remain
+  `unverified` until destination bounds evidence is available.
 - Mark incomplete chains `unverified` and state which evidence is missing.
 - Prefer inspecting handlers, shared handler callees, and high-confidence source
   candidates before unrelated functions.

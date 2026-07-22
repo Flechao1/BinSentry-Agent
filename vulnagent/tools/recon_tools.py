@@ -4,7 +4,8 @@ import json
 from typing import Any
 
 from vulnagent.clients.ida_client import IdaClient
-from vulnagent.ida.schemas import FunctionContext
+from vulnagent.agent.validation_planner import ValidationPlanner
+from vulnagent.ida.schemas import FunctionContext, SinkCallResult
 from vulnagent.rules import get_default_sink_specs
 
 
@@ -22,6 +23,8 @@ def _json_result(text: str, **fields: Any) -> str:
         "pending_sinks": [],
         "missing_evidence": [],
         "verified_findings": [],
+        "candidate_findings": [],
+        "known_vulnerability_matches": [],
         "function_notes": [],
         "indirect_call_sites": [],
     }
@@ -42,9 +45,10 @@ class IdaReconTools:
 
     def __init__(self, client: IdaClient) -> None:
         self.client = client
+        self.validation_planner = ValidationPlanner()
 
     def get_function_context(self, ea: int | str) -> str:
-        context = self.client.get_function_context(ea)
+        context = self.client.get_function_context(self._resolve_function_ea(ea))
         text = format_function_context(context)
         return _json_result(
             text,
@@ -66,7 +70,7 @@ class IdaReconTools:
         )
 
     def decompile_function(self, ea: int | str) -> str:
-        result = self.client.decompile_function(ea)
+        result = self.client.decompile_function(self._resolve_function_ea(ea))
         if not result.ok:
             text = f"[FAILED] decompile {result.ea}: {result.error}"
             return _json_result(
@@ -94,8 +98,16 @@ class IdaReconTools:
         )
 
     def get_function_xrefs(self, ea: int | str) -> str:
-        xrefs = self.client.get_function_xrefs(ea)
-        lines = ["Xrefs to function:"]
+        xrefs = self.client.get_function_xrefs(self._resolve_function_ea(ea))
+        return self._format_xrefs("Xrefs to function", xrefs)
+
+    def get_address_xrefs(self, ea: int | str) -> str:
+        """Retrieve direct xrefs for any code or data address, including globals."""
+        xrefs = self.client.get_address_xrefs(ea)
+        return self._format_xrefs("Xrefs to address", xrefs)
+
+    def _format_xrefs(self, heading: str, xrefs: dict[str, list[Any]]) -> str:
+        lines = [f"{heading}:"]
         lines.extend(
             f"- {record.frm} -> {record.to} ({record.type_name})"
             for record in xrefs["to"]
@@ -103,7 +115,7 @@ class IdaReconTools:
         if len(lines) == 1:
             lines.append("- (none)")
         lines.append("")
-        lines.append("Xrefs from function:")
+        lines.append("Xrefs from address:")
         from_start = len(lines)
         lines.extend(
             f"- {record.frm} -> {record.to} ({record.type_name})"
@@ -114,10 +126,11 @@ class IdaReconTools:
         return "\n".join(lines)
 
     def get_function_signals(self, ea: int | str) -> str:
-        calls = self.client.get_function_calls(ea)
-        strings = self.client.get_function_strings(ea)
-        constants = self.client.get_function_constants(ea)
-        imports = self.client.get_function_imports(ea)
+        resolved_ea = self._resolve_function_ea(ea)
+        calls = self.client.get_function_calls(resolved_ea)
+        strings = self.client.get_function_strings(resolved_ea)
+        constants = self.client.get_function_constants(resolved_ea)
+        imports = self.client.get_function_imports(resolved_ea)
 
         lines = [
             f"Imports: {_join(imports)}",
@@ -146,12 +159,28 @@ class IdaReconTools:
         return _json_result(
             text,
             function_notes=[{
-                "function_ea": str(ea),
+                "function_ea": str(resolved_ea),
                 "note": (
                     f"signals: calls={len(calls)}, imports={_join(imports)}, "
                     f"strings={len(strings)}, constants={len(constants)}"
                 ),
             }],
+        )
+
+    def _resolve_function_ea(self, value: int | str) -> int | str:
+        if isinstance(value, int):
+            return value
+        text = str(value).strip()
+        if text.lower().startswith("0x") or text.isdigit():
+            return text
+        functions = self.client.list_functions(pattern=text, limit=10)
+        exact = [function for function in functions if function.name == text]
+        if len(exact) == 1:
+            return exact[0].ea
+        if len(functions) == 1:
+            return functions[0].ea
+        raise ValueError(
+            f"Function name is ambiguous or unknown: {text}. Use list_binary_functions first."
         )
 
     def rename_function(self, ea: int | str, new_name: str, reason: str = "") -> str:
@@ -244,6 +273,10 @@ class IdaReconTools:
         return _json_result(
             text,
             pending_sinks=pending_sinks,
+            candidate_findings=[
+                self.validation_planner.plan(result).model_dump(mode="json")
+                for result in results
+            ],
             missing_evidence=missing_evidence,
         )
 
@@ -301,7 +334,69 @@ class IdaReconTools:
         return _json_result(
             "\n".join(lines),
             pending_sinks=pending_sinks,
+            candidate_findings=[
+                self.validation_planner.plan(sink).model_dump(mode="json")
+                for sink in result.results
+            ],
             missing_evidence=missing_evidence,
+        )
+
+    def validate_sink_candidate(
+        self,
+        caller_ea: int | str,
+        sink_ea: int | str,
+        sink_name: str,
+        callee_ea: int | str = "",
+        sources: str = "",
+    ) -> str:
+        """Validate one sink candidate by tracing its dangerous arguments.
+
+        Use this after a sink scan. It returns a conservative verified,
+        unverified, or rejected verdict with the exact missing evidence.
+        """
+        name = _normalize_func_key(sink_name)
+        results = self.client.find_sink_calls(
+            caller_ea,
+            {name: get_default_sink_specs().get(name, [("range", 1, 32)])},
+        )
+        target_ea = str(sink_ea).lower()
+        sink = next(
+            (
+                result
+                for result in results
+                if result.sink_name == name and result.loc.lower() == target_ea
+            ),
+            None,
+        )
+        if sink is None:
+            return _json_result(
+                f"Sink candidate not found: {name} @ {sink_ea} in {caller_ea}.",
+                missing_evidence=[{
+                    "reason": "Re-scan the caller or confirm the exact sink call address.",
+                }],
+            )
+        if callee_ea and not sink.callee_ea:
+            sink = sink.model_copy(update={"callee_ea": str(callee_ea)})
+        known_sources = [item.strip() for item in sources.split(",") if item.strip()]
+        candidate = self.validation_planner.validate(
+            sink,
+            self.client,
+            known_sources=known_sources,
+        )
+        payload = candidate.model_dump(mode="json")
+        return _json_result(
+            f"Candidate {candidate.candidate_id}: {candidate.status}. {candidate.conclusion}",
+            candidate_findings=[payload],
+            verified_findings=[payload] if candidate.status == "verified" else [],
+            missing_evidence=[{"reason": item} for item in candidate.missing_evidence],
+            pending_sinks=[] if candidate.status in {"verified", "rejected"} else [{
+                "sink_name": candidate.sink_name,
+                "sink_ea": candidate.sink_ea,
+                "caller_name": candidate.caller_name,
+                "caller_ea": candidate.caller_ea,
+                "category": candidate.category,
+                "reason": candidate.conclusion,
+            }],
         )
 
     def trace_call_chain(

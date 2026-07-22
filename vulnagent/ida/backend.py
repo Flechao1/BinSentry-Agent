@@ -101,6 +101,17 @@ def create_app(backend: IdaBackend | None = None) -> Any:
         except Exception as exc:  # noqa: BLE001
             _api_error(exc)
 
+    @app.get("/addresses/{ea}/xrefs")
+    async def get_address_xrefs(ea: str) -> dict[str, Any]:
+        try:
+            result = app.state.backend.get_address_xrefs(parse_address(ea))
+            return {
+                "to": [record.model_dump() for record in result["to"]],
+                "from": [record.model_dump() for record in result["from"]],
+            }
+        except Exception as exc:  # noqa: BLE001
+            _api_error(exc)
+
     @app.get("/functions/{ea}/calls")
     async def get_function_calls(ea: str) -> list[dict[str, Any]]:
         try:
