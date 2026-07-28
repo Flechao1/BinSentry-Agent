@@ -6,8 +6,10 @@ from vulnagent.ida.core import IdaBackend, IdaBackendError, UnavailableIdaBacken
 from vulnagent.ida.schemas import (
     BatchDecompileRequest,
     CloseDatabaseRequest,
+    ExportPatchedBinaryRequest,
     FindSinkCallsRequest,
     NopBytesRequest,
+    OpenSessionRequest,
     PatchBytesRequest,
     PatchConditionalJumpRequest,
     RenameFunctionRequest,
@@ -73,6 +75,14 @@ def create_app(backend: IdaBackend | None = None) -> Any:
     @app.get("/health")
     async def health() -> dict[str, str]:
         return app.state.backend.health()
+
+    @app.post("/database/open")
+    async def open_database(request: OpenSessionRequest) -> dict[str, Any]:
+        try:
+            result = app.state.backend.open_database(request)
+            return result.model_dump()
+        except Exception as exc:  # noqa: BLE001
+            _api_error(exc)
 
     @app.get("/functions/{ea}/context")
     async def get_function_context(ea: str) -> dict[str, Any]:
@@ -328,6 +338,18 @@ def create_app(backend: IdaBackend | None = None) -> Any:
     async def save_database(request: SaveDatabaseRequest) -> dict[str, Any]:
         try:
             result = app.state.backend.save_database(request.output_path or None)
+            return result.model_dump()
+        except Exception as exc:  # noqa: BLE001
+            _api_error(exc)
+
+    @app.post("/binary/export-patched")
+    async def export_patched_binary(request: ExportPatchedBinaryRequest) -> dict[str, Any]:
+        try:
+            result = app.state.backend.export_patched_binary(
+                request.output_path or None,
+                request.overwrite,
+                request.source_path or None,
+            )
             return result.model_dump()
         except Exception as exc:  # noqa: BLE001
             _api_error(exc)

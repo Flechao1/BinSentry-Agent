@@ -7,6 +7,7 @@ import type {
   FirmwareTriageReport,
   HarnessRun,
   HarnessRunDetail,
+  IdaOpenResponse,
   IntelSearchResult,
   ReportDetail,
   ReportSummary
@@ -35,6 +36,16 @@ export const api = {
       body: JSON.stringify(config)
     }),
   resetLlmConfig: () => request<ApiHealth["llm"]>("/api/settings/llm/reset", { method: "POST" }),
+  openIdaDatabase: (idbPath: string, writable = false) =>
+    request<IdaOpenResponse>("/api/ida/open", {
+      method: "POST",
+      body: JSON.stringify({ idb_path: idbPath, writable })
+    }),
+  closeIdaDatabase: (save = false) =>
+    request<{ ok: boolean }>("/api/ida/close", {
+      method: "POST",
+      body: JSON.stringify({ save })
+    }),
   runs: () => request<HarnessRun[]>("/api/harness/runs?limit=12"),
   run: (id: string) => request<HarnessRunDetail>(`/api/harness/runs/${id}`),
   reports: () => request<ReportSummary[]>("/api/reports?limit=20"),

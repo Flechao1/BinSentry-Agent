@@ -38,7 +38,7 @@ Create or update `.env`:
 ```env
 DEEPSEEK_API_KEY=your-api-key
 DEEPSEEK_API_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-v4-flash
 LLM_TEMPERATURE=0.0
 
 IDA_BACKEND_URL=http://127.0.0.1:8765
@@ -175,7 +175,7 @@ Configure DeepSeek in the workspace `.env` file:
 ```env
 DEEPSEEK_API_KEY=your-new-api-key
 DEEPSEEK_API_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-v4-flash
 LLM_TEMPERATURE=0.0
 ```
 
@@ -337,6 +337,7 @@ databases to a copy when possible:
 
 ```env
 VULN_ENABLE_IDB_WRITES=true
+VULN_AGENT_DIRECT_IDB_WRITES=true
 ```
 
 Supported confirmed write operations:
@@ -348,9 +349,10 @@ Supported confirmed write operations:
 - Patch supported conditional jumps: x86 short/near Jcc and MIPS `beq`/`bne`.
 - Save the active IDA database.
 
-The Agent can only request these mutations. The write tools pause with a confirmation
-payload before execution, and the backend refuses mutation when it was started in
-read-only mode.
+The backend refuses mutation when it was started in read-only mode. When
+`VULN_AGENT_DIRECT_IDB_WRITES=true`, the standalone Agent Chat runtime registers direct
+write tools, so the Agent can request patch, NOP, jump, rename, comment, and save
+operations during conversation.
 
 ### Register in agent-service-toolkit
 

@@ -3,12 +3,15 @@ from __future__ import annotations
 import math
 import random
 import re
+import shutil
+import struct
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from vulnagent.ida.core import IdaBackend, format_address, parse_address
 from vulnagent.ida.schemas import (
@@ -24,7 +27,10 @@ from vulnagent.ida.schemas import (
     ImportEntry,
     IndirectCallCandidate,
     IndirectCallScanResult,
+    ExportPatchedBinaryResponse,
     NopBytesRequest,
+    OpenSessionRequest,
+    OpenSessionResponse,
     PatchBytesResponse,
     PatchConditionalJumpRequest,
     RenameFunctionResponse,
@@ -55,6 +61,7 @@ class IdalibBackend(IdaBackend):
     def __init__(self, idb_path: str = "", writable: bool = True) -> None:
         self.idb_path = str(idb_path or "")
         self.writable = writable
+        self._write_capable = writable
         self._opened = False
         self._ida: dict[str, Any] = {}
         self._import_names_by_ea: dict[int, str] = {}
@@ -129,6 +136,21 @@ class IdalibBackend(IdaBackend):
             "protocol_version": IDA_PROTOCOL_VERSION,
             "writable": str(self.writable).lower(),
         }
+
+    def open_database(self, request: OpenSessionRequest) -> OpenSessionResponse:
+        if self._opened:
+            self.close_database(save=False)
+        self.idb_path = request.idb_path
+        self.writable = bool(request.writable) and self._write_capable
+        self._ida = {}
+        self._import_names_by_ea = {}
+        self.open()
+        return OpenSessionResponse(
+            session_id=request.session_id or uuid4().hex,
+            idb_path=self.idb_path,
+            database=self.health().get("database", self.idb_path),
+            writable=self.writable,
+        )
 
     def get_function_context(self, ea: int) -> FunctionContext:
         self.open()
@@ -485,6 +507,139 @@ class IdalibBackend(IdaBackend):
             path=str(Path(path).resolve()),
             ok=ok,
             message="saved" if ok else "ida_loader.save_database returned false",
+        )
+
+    def export_patched_binary(
+        self,
+        output_path: str | None = None,
+        overwrite: bool = False,
+        source_path: str | None = None,
+    ) -> ExportPatchedBinaryResponse:
+        self.open()
+        if not self.writable:
+            return ExportPatchedBinaryResponse(
+                path="",
+                ok=False,
+                message="backend is read-only",
+            )
+
+        source_path = self._input_file_path(source_path)
+        if not source_path.exists() or not source_path.is_file():
+            return ExportPatchedBinaryResponse(
+                path="",
+                source_path=str(source_path),
+                ok=False,
+                message=f"input binary not found: {source_path}",
+            )
+        if source_path.suffix.lower() in {".idb", ".i64"}:
+            return ExportPatchedBinaryResponse(
+                path="",
+                source_path=str(source_path.resolve()),
+                ok=False,
+                message=(
+                    "refusing to export from an IDA database file; provide source_path "
+                    "for the original ELF, for example /path/to/squashfs-root/bin/boa"
+                ),
+            )
+
+        target_path = Path(output_path).expanduser() if output_path else source_path.with_name(f"{source_path.name}.patched")
+        replace_corrupt_elf = False
+        if target_path.exists() and not overwrite:
+            # A previous implementation could leave a file containing only
+            # raw patch bytes.  It is safe to replace that artifact because it
+            # is not a valid ELF; valid output still requires overwrite=true.
+            try:
+                replace_corrupt_elf = (
+                    source_path.read_bytes().startswith(b"\x7fELF")
+                    and not target_path.read_bytes().startswith(b"\x7fELF")
+                )
+            except OSError:
+                replace_corrupt_elf = False
+            if not replace_corrupt_elf:
+                return ExportPatchedBinaryResponse(
+                    path=str(target_path.resolve()),
+                    source_path=str(source_path.resolve()),
+                    ok=False,
+                    message="output_path already exists; pass overwrite=true to replace it",
+                )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if replace_corrupt_elf:
+            self._unlink_export_target(target_path)
+        shutil.copy2(source_path, target_path)
+
+        source_data = source_path.read_bytes()
+        if source_data.startswith(b"\x7fELF"):
+            source_kind = "ELF"
+        else:
+            source_kind = "binary"
+
+        patches, skipped, mismatched = self._collect_file_backed_patches(source_data)
+        if not patches:
+            self._unlink_export_target(target_path)
+            return ExportPatchedBinaryResponse(
+                path=str(target_path.resolve()),
+                source_path=str(source_path.resolve()),
+                ok=False,
+                patched_bytes=0,
+                skipped_bytes=skipped,
+                mismatched_bytes=mismatched,
+                message="no safe file-backed patched bytes found in IDA database",
+            )
+        if mismatched:
+            self._unlink_export_target(target_path)
+            return ExportPatchedBinaryResponse(
+                path=str(target_path.resolve()),
+                source_path=str(source_path.resolve()),
+                ok=False,
+                patched_bytes=0,
+                skipped_bytes=skipped,
+                mismatched_bytes=mismatched,
+                message=(
+                    "patched bytes were not exported because IDA original bytes did not match "
+                    "the input file; verify that IDA opened the same original binary"
+                ),
+            )
+
+        with target_path.open("r+b") as handle:
+            for file_offset, value in patches:
+                handle.seek(file_offset)
+                handle.write(bytes([value & 0xFF]))
+
+        # Never report success for an output that is no longer a valid copy of
+        # the input format.  This catches the most damaging failure mode here:
+        # treating an IDA virtual address as an ELF file offset.
+        output_data = target_path.read_bytes()
+        if source_data.startswith(b"\x7fELF") and not output_data.startswith(b"\x7fELF"):
+            self._unlink_export_target(target_path)
+            return ExportPatchedBinaryResponse(
+                path=str(target_path.resolve()),
+                source_path=str(source_path.resolve()),
+                ok=False,
+                patched_bytes=0,
+                skipped_bytes=skipped,
+                mismatched_bytes=mismatched,
+                message="export validation failed: output is not an ELF file",
+            )
+        if len(output_data) != len(source_data):
+            self._unlink_export_target(target_path)
+            return ExportPatchedBinaryResponse(
+                path=str(target_path.resolve()),
+                source_path=str(source_path.resolve()),
+                ok=False,
+                patched_bytes=0,
+                skipped_bytes=skipped,
+                mismatched_bytes=mismatched,
+                message="export validation failed: output size changed",
+            )
+
+        return ExportPatchedBinaryResponse(
+            path=str(target_path.resolve()),
+            source_path=str(source_path.resolve()),
+            ok=True,
+            patched_bytes=len(patches),
+            skipped_bytes=skipped,
+            mismatched_bytes=mismatched,
+            message=f"exported patched {source_kind}",
         )
 
     def close_database(self, save: bool = False) -> None:
@@ -1429,6 +1584,171 @@ class IdalibBackend(IdaBackend):
         for offset, value in enumerate(data):
             ok = bool(ida_bytes.patch_byte(ea + offset, value)) and ok
         return ok
+
+    def _input_file_path(self, explicit_source_path: str | None = None) -> Path:
+        ida_nalt = self._ida.get("ida_nalt")
+        idc = self._ida.get("idc")
+        candidates: list[str] = []
+
+        if explicit_source_path:
+            candidates.append(explicit_source_path)
+
+        for owner in (ida_nalt, idc):
+            getter = getattr(owner, "get_input_file_path", None)
+            if getter is None:
+                continue
+            try:
+                value = str(getter() or "").strip()
+            except Exception:
+                continue
+            if value:
+                candidates.append(value)
+
+        candidates.append(self.idb_path)
+        for candidate in list(candidates):
+            path = Path(candidate).expanduser()
+            if path.suffix.lower() in {".idb", ".i64"}:
+                stem_path = path.with_suffix("")
+                candidates.extend([
+                    str(stem_path),
+                    str(path.with_name(stem_path.name)),
+                ])
+
+        for candidate in candidates:
+            path = Path(candidate).expanduser()
+            if path.exists() and path.is_file() and path.suffix.lower() not in {".idb", ".i64"}:
+                return path
+        for candidate in candidates:
+            path = Path(candidate).expanduser()
+            if path.exists() and path.is_file():
+                return path
+        return Path(candidates[0]).expanduser() if candidates else Path(self.idb_path).expanduser()
+
+    def _collect_file_backed_patches(self, source_data: bytes) -> tuple[list[tuple[int, int]], int, int]:
+        ida_bytes = self._ida["ida_bytes"]
+        idautils = self._ida["idautils"]
+        idc = self._ida["idc"]
+        ida_loader = self._ida.get("ida_loader")
+        elf_segments = self._elf_load_segments(source_data)
+
+        patches: list[tuple[int, int]] = []
+        seen_offsets: set[int] = set()
+        skipped = 0
+        mismatched = 0
+
+        def visit(ea: int, fpos: int, original: int, patched: int) -> int:
+            nonlocal skipped, mismatched
+            original_byte = int(original) & 0xFF
+            candidate_offsets: list[int] = []
+
+            # For ELF, derive the offset from PT_LOAD first.  It remains
+            # correct for stripped binaries with no section header, and avoids
+            # versions of IDALib that report an invalid fpos for MIPS inputs.
+            for offset in self._elf_file_offsets_for_ea(int(ea), elf_segments):
+                candidate_offsets.append(offset)
+            if int(fpos) >= 0:
+                candidate_offsets.append(int(fpos))
+            if ida_loader is not None:
+                try:
+                    loader_offset = int(ida_loader.get_fileregion_offset(int(ea)))
+                except Exception:
+                    loader_offset = -1
+                if loader_offset >= 0:
+                    candidate_offsets.append(loader_offset)
+
+            file_offset = next(
+                (
+                    offset
+                    for offset in candidate_offsets
+                    if 0 <= offset < len(source_data)
+                    and offset not in seen_offsets
+                    and source_data[offset] == original_byte
+                ),
+                -1,
+            )
+            if file_offset < 0:
+                skipped += 1
+                if any(0 <= offset < len(source_data) for offset in candidate_offsets):
+                    mismatched += 1
+                return 0
+            if file_offset < 4 and source_data.startswith(b"\x7fELF"):
+                skipped += 1
+                return 0
+            seen_offsets.add(file_offset)
+            patches.append((file_offset, int(patched) & 0xFF))
+            return 0
+
+        for seg_ea in idautils.Segments():
+            start = int(seg_ea)
+            end = int(idc.get_segm_end(start) or start)
+            if end <= start:
+                continue
+            ida_bytes.visit_patched_bytes(start, end, visit)
+
+        patches.sort(key=lambda item: item[0])
+        return patches, skipped, mismatched
+
+    @staticmethod
+    def _elf_load_segments(data: bytes) -> list[tuple[int, int, int, int]]:
+        """Return (vaddr, memsz, file_offset, file_size) for PT_LOAD segments."""
+        if len(data) < 52 or not data.startswith(b"\x7fELF"):
+            return []
+        elf_class = data[4]
+        endian = ">" if data[5] == 2 else "<" if data[5] == 1 else ""
+        if not endian:
+            return []
+        try:
+            if elf_class == 1:
+                phoff = struct.unpack_from(f"{endian}I", data, 28)[0]
+                phentsize = struct.unpack_from(f"{endian}H", data, 42)[0]
+                phnum = struct.unpack_from(f"{endian}H", data, 44)[0]
+                fields = ("I", 4, 8, 16, 20)
+            elif elf_class == 2 and len(data) >= 64:
+                phoff = struct.unpack_from(f"{endian}Q", data, 32)[0]
+                phentsize = struct.unpack_from(f"{endian}H", data, 54)[0]
+                phnum = struct.unpack_from(f"{endian}H", data, 56)[0]
+                fields = ("Q", 8, 16, 32, 40)
+            else:
+                return []
+        except struct.error:
+            return []
+
+        segments: list[tuple[int, int, int, int]] = []
+        for index in range(int(phnum)):
+            offset = int(phoff) + index * int(phentsize)
+            if offset < 0 or offset + int(phentsize) > len(data):
+                continue
+            try:
+                p_type = struct.unpack_from(f"{endian}I", data, offset)[0]
+                if p_type != 1:
+                    continue
+                word, offset_pos, vaddr_pos, filesz_pos, memsz_pos = fields
+                p_offset = struct.unpack_from(f"{endian}{word}", data, offset + offset_pos)[0]
+                p_vaddr = struct.unpack_from(f"{endian}{word}", data, offset + vaddr_pos)[0]
+                p_filesz = struct.unpack_from(f"{endian}{word}", data, offset + filesz_pos)[0]
+                p_memsz = struct.unpack_from(f"{endian}{word}", data, offset + memsz_pos)[0]
+            except struct.error:
+                continue
+            if p_filesz and p_offset < len(data):
+                segments.append((int(p_vaddr), int(p_memsz), int(p_offset), int(p_filesz)))
+        return segments
+
+    @staticmethod
+    def _elf_file_offsets_for_ea(
+        ea: int,
+        segments: list[tuple[int, int, int, int]],
+    ) -> list[int]:
+        offsets: list[int] = []
+        for vaddr, _memsz, file_offset, file_size in segments:
+            if vaddr <= ea < vaddr + file_size:
+                offsets.append(file_offset + (ea - vaddr))
+        return offsets
+
+    def _unlink_export_target(self, target_path: Path) -> None:
+        try:
+            target_path.unlink(missing_ok=True)
+        except Exception:
+            return
 
     def _set_patch_comment(self, ea: int, reason: str) -> None:
         idc = self._ida.get("idc")

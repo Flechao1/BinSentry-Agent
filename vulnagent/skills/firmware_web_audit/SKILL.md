@@ -49,6 +49,11 @@ truth. Use language-model reasoning to prioritize investigation and explain evid
   next function is necessary.
 - Use `find_function_sink_calls` for a known function. Reserve
   `scan_dangerous_sink_calls` for bounded multi-function discovery.
+- Use `investigate_vulnerability_candidates` for the first bounded verification
+  pass when the user asks to find vulnerabilities broadly. It combines sink
+  discovery, sink-argument origin tracing, and conservative candidate verdicts
+  in one tool result. Follow up with `validate_sink_candidate` only for a specific
+  candidate that needs deeper evidence.
 - After discovering a non-constant command or memory sink, use
   `validate_sink_candidate` before claiming a vulnerability. This creates a
   per-sink candidate verdict by tracing the relevant arguments. Do not replace

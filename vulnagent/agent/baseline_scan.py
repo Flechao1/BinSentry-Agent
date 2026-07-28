@@ -220,7 +220,54 @@ class BaselineScanner:
         planner: ValidationPlanner,
     ) -> CandidateFinding:
         candidate = planner.plan(sink)
-        if not sink.callee_ea or not candidate.arguments:
+        if not candidate.arguments:
+            return planner.evaluate(candidate)
+
+        if not sink.callee_ea:
+            # Some IDA import/thunk resolutions do not expose a callee address.
+            # The caller-level chain tracer can still prove a source-to-sink path.
+            try:
+                chains = await self.client.trace_call_chain(
+                    ea=sink.caller_addr,
+                    arg_index=candidate.arguments[0].index,
+                    sources=sources or None,
+                    max_depth=20,
+                    max_chains=5,
+                )
+            except Exception as exc:  # noqa: BLE001 - keep candidate reviewable
+                candidate.missing_evidence.append(
+                    f"Fallback call-chain tracing failed: {type(exc).__name__}: {exc}"
+                )
+                return planner.evaluate(candidate)
+
+            verified_chain = next(
+                (chain for chain in chains if chain.taint_verified),
+                None,
+            )
+            if verified_chain is not None:
+                tainted_node = next(
+                    (
+                        node for node in verified_chain.chain
+                        if node.taint_status.lower() in {"tainted", "verified", "propagated"}
+                    ),
+                    None,
+                )
+                if tainted_node is not None:
+                    candidate.evidence.append(
+                        f"Fallback call-chain evidence: {verified_chain.chain_str}."
+                    )
+                    return planner.apply_origins(
+                        candidate,
+                        {
+                            candidate.arguments[0].index: ArgumentOriginResult(
+                                taint_status="tainted",
+                                source_func=tainted_node.source_func or tainted_node.func_name,
+                                source_param=tainted_node.source_param,
+                                source_expr=tainted_node.source_expr,
+                                reason=tainted_node.taint_reason or "Call-chain tracer verified taint.",
+                            )
+                        },
+                    )
             return planner.evaluate(candidate)
 
         origins: dict[int, ArgumentOriginResult] = {}

@@ -143,6 +143,17 @@ def build_readonly_ida_tools(client: IdaClient) -> list[Any]:
             description="Run a bounded scan for dangerous command and memory-operation sinks.",
         ),
         StructuredTool.from_function(
+            recon.investigate_vulnerability_candidates,
+            name="investigate_vulnerability_candidates",
+            description=(
+                "Run the bounded vulnerability verification loop: scan dangerous sinks, "
+                "extract their arguments, trace argument origins, and return structured "
+                "verified/unverified/rejected candidate findings plus missing evidence. "
+                "Use this for a first vulnerability pass; use validate_sink_candidate "
+                "for a later focused re-check."
+            ),
+        ),
+        StructuredTool.from_function(
             recon.validate_sink_candidate,
             name="validate_sink_candidate",
             description=(

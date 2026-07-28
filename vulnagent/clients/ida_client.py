@@ -16,6 +16,9 @@ from vulnagent.ida.schemas import (
     HealthResponse,
     ImportEntry,
     IndirectCallScanResult,
+    ExportPatchedBinaryResponse,
+    OpenSessionRequest,
+    OpenSessionResponse,
     PatchBytesResponse,
     PatchConditionalJumpRequest,
     RenameFunctionResponse,
@@ -114,6 +117,20 @@ class IdaClient:
     def health(self) -> HealthResponse:
         payload = self._request_object("GET", "/health")
         return HealthResponse.model_validate(payload)
+
+    def open_database(
+        self,
+        idb_path: str,
+        session_id: str = "",
+        writable: bool = True,
+    ) -> OpenSessionResponse:
+        request = OpenSessionRequest(
+            idb_path=idb_path,
+            session_id=session_id,
+            writable=writable,
+        )
+        payload = self._request_object("POST", "/database/open", request.model_dump())
+        return OpenSessionResponse.model_validate(payload)
 
     def validate_protocol(self, expected_version: str = "1.0") -> HealthResponse:
         health = self.health()
@@ -369,6 +386,19 @@ class IdaClient:
     def save_database(self, output_path: str = "") -> SaveDatabaseResponse:
         payload = self._request_object("POST", "/database/save", {"output_path": output_path})
         return SaveDatabaseResponse.model_validate(payload)
+
+    def export_patched_binary(
+        self,
+        output_path: str = "",
+        overwrite: bool = False,
+        source_path: str = "",
+    ) -> ExportPatchedBinaryResponse:
+        payload = self._request_object(
+            "POST",
+            "/binary/export-patched",
+            {"output_path": output_path, "overwrite": overwrite, "source_path": source_path},
+        )
+        return ExportPatchedBinaryResponse.model_validate(payload)
 
     def close_database(self, save: bool = False) -> bool:
         payload = self._request_object("POST", "/database/close", {"save": save})

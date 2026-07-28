@@ -40,6 +40,16 @@ function short(value: unknown, limit = 88) {
   return text.length <= limit ? text : `${text.slice(0, limit - 3)}...`;
 }
 
+function splitPath(value?: string | null) {
+  const text = value?.trim() || "";
+  if (!text) return { full: "", name: "", parent: "" };
+  const normalized = text.replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  const name = parts[parts.length - 1] || normalized;
+  const parent = normalized.slice(0, Math.max(0, normalized.length - name.length)).replace(/[\\/]$/, "");
+  return { full: text, name, parent };
+}
+
 function stateTone(status = "") {
   const normalized = status.toLowerCase();
   if (["completed", "connected", "verified", "configured", "online"].includes(normalized)) return "ok";
@@ -355,7 +365,7 @@ export function App() {
     <div className="agent-shell">
       <Sidebar view={view} setView={setView} health={health} reports={reports} chatThreads={chatThreads} activeThreadId={threadId} runScan={runScan} busy={busy} openReport={openReport} loadChatThread={loadChatThread} createChat={createChat} renameChat={renameChat} clearChat={clearChat} deleteChat={deleteChat} />
       <main className={`workspace view-${view}`}>
-        <Topbar health={health} activeReport={activeReport} refresh={refresh} runScan={runScan} busy={busy} />
+        <Topbar health={health} activeReport={activeReport} refresh={refresh} openReport={openReport} busy={busy} />
         {error && <div className="error-banner">{error}</div>}
         {view === "dashboard" && <section className="kpi-row overview-kpis">
           <Metric label="Findings" value={activeReport?.findings.length ?? 0} hint="Open issues" />
@@ -399,7 +409,7 @@ function Sidebar(props: { view: View; setView: (view: View) => void; health: Api
       <SidebarFact label="Protocol" value={props.health?.ida.protocol_version ?? "-"} />
       <p className="sidebar-label">LLM Agent</p>
       <SidebarFact label="Provider" value={props.health?.llm.provider ?? "DeepSeek"} />
-      <SidebarFact label="Model" value={props.health?.llm.model ?? "deepseek-chat"} />
+      <SidebarFact label="Model" value={props.health?.llm.model ?? "deepseek-v4-flash"} />
       <SidebarFact label="Status" value={props.health?.llm.configured ? "Configured" : "Missing Key"} tone={props.health?.llm.configured ? "ok" : "warn"} />
       <p className="sidebar-label">Quick Actions</p>
       <button className="danger-action" disabled={props.busy === "scan"} onClick={props.runScan}>{props.busy === "scan" ? "Scanning" : "Start Baseline Scan"}</button>
@@ -420,11 +430,16 @@ function Sidebar(props: { view: View; setView: (view: View) => void; health: Api
 
 function SidebarFact(props: { label: string; value: string; tone?: string }) { return <div className="sidebar-fact"><span>{props.label}</span><strong className={props.tone ? `tone-${props.tone}` : ""}>{props.value}</strong></div>; }
 
-function Topbar(props: { health: ApiHealth | null; activeReport: ReportDetail | null; refresh: () => void; runScan: () => void; busy: string; }) {
-  return <header className="topbar"><TopFact label="Active Sample" value={short(props.health?.ida.database ?? "No IDB connected", 42)} action="Change" /><div className="top-statuses"><TopStatus label="IDA" value={props.health?.ida.connected ? "Connected" : "Offline"} tone={props.health?.ida.connected ? "ok" : "bad"} /><TopStatus label="Arch" value={`${props.health?.ida.architecture ?? "-"} / ${props.health?.ida.bits ?? "-"}-bit`} /><TopStatus label="LLM" value={props.health?.llm.configured ? `${props.health?.llm.provider ?? "Configured"}` : "Not configured"} tone={props.health?.llm.configured ? "ok" : "warn"} /></div><TopFact label="Report ID" value={short(props.activeReport?.report_id ?? "-", 20)} /><div className="top-actions"><button onClick={props.refresh}>Refresh</button><button onClick={props.runScan} disabled={props.busy === "scan"}>Open Report</button></div></header>;
+function Topbar(props: { health: ApiHealth | null; activeReport: ReportDetail | null; refresh: () => void; openReport: (id: string) => void; busy: string; }) {
+  const reportId = props.activeReport?.report_id ?? "";
+  return <header className="topbar"><TopPathFact label="Active Sample" value={props.health?.ida.database ?? ""} empty="No IDB connected" action="Change" /><div className="top-statuses"><TopStatus label="IDA" value={props.health?.ida.connected ? "Connected" : "Offline"} tone={props.health?.ida.connected ? "ok" : "bad"} /><TopStatus label="Arch" value={`${props.health?.ida.architecture ?? "-"} / ${props.health?.ida.bits ?? "-"}-bit`} /><TopStatus label="LLM" value={props.health?.llm.configured ? `${props.health?.llm.provider ?? "Configured"}` : "Not configured"} tone={props.health?.llm.configured ? "ok" : "warn"} /></div><TopFact label="Report ID" value={reportId ? short(reportId, 20) : "-"} title={reportId || undefined} /><div className="top-actions"><button onClick={props.refresh}>Refresh</button><button onClick={() => reportId && props.openReport(reportId)} disabled={!reportId || props.busy === "report"}>Open Report</button></div></header>;
 }
 
-function TopFact(props: { label: string; value: string; action?: string; tone?: string }) { return <div className="top-fact"><span>{props.label}</span><strong className={props.tone ? `tone-${props.tone}` : ""}>{props.value}</strong>{props.action && <em>{props.action} &gt;</em>}</div>; }
+function TopFact(props: { label: string; value: string; action?: string; tone?: string; title?: string }) { return <div className="top-fact" title={props.title ?? props.value}><span>{props.label}</span><strong className={props.tone ? `tone-${props.tone}` : ""}>{props.value}</strong>{props.action && <em>{props.action} &gt;</em>}</div>; }
+function TopPathFact(props: { label: string; value: string; empty: string; action?: string }) {
+  const path = splitPath(props.value);
+  return <div className="top-fact top-path-fact" title={path.full || props.empty}><span>{props.label}</span><strong>{path.name || props.empty}</strong>{path.parent && <small>{path.parent}</small>}{props.action && <em>{props.action} &gt;</em>}</div>;
+}
 function TopStatus(props: { label: string; value: string; tone?: string }) { return <div className="top-status"><span>{props.label}</span><strong className={props.tone ? `tone-${props.tone}` : ""}><i />{props.value}</strong></div>; }
 function Metric({ label, value, hint, tone = "neutral" }: { label: string; value: unknown; hint: string; tone?: string }) { return <div className={`metric ${tone}`}><span>{label}</span><strong>{String(value)}</strong><em>{hint}</em></div>; }
 
@@ -503,11 +518,14 @@ const AgentActivity = memo(function AgentActivity({ messages }: { messages: Chat
 
 function SettingsPage({ health, refresh }: { health: ApiHealth | null; refresh: () => void }) {
   const [provider, setProvider] = useState("DeepSeek");
-  const [model, setModel] = useState("deepseek-chat");
+  const [model, setModel] = useState("deepseek-v4-flash");
   const [baseUrl, setBaseUrl] = useState("https://api.deepseek.com");
   const [temperature, setTemperature] = useState(0);
   const [maxTokens, setMaxTokens] = useState(2400);
   const [apiKey, setApiKey] = useState("");
+  const [idaPath, setIdaPath] = useState("");
+  const [idaWritable, setIdaWritable] = useState(false);
+  const [idaBusy, setIdaBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -515,11 +533,14 @@ function SettingsPage({ health, refresh }: { health: ApiHealth | null; refresh: 
     const config = health?.llm;
     if (!config) return;
     setProvider(config.provider ?? "DeepSeek");
-    setModel(config.model ?? "deepseek-chat");
+    setModel(config.model ?? "deepseek-v4-flash");
     setBaseUrl(config.base_url && config.base_url !== "default" ? config.base_url : "");
     setTemperature(config.temperature ?? 0);
     setMaxTokens(config.max_tokens ?? 2400);
   }, [health?.llm.configured, health?.llm.provider, health?.llm.model, health?.llm.base_url, health?.llm.temperature, health?.llm.max_tokens]);
+  useEffect(() => {
+    if (health?.ida.database) setIdaPath(health.ida.database);
+  }, [health?.ida.database]);
 
   async function save() {
     setSaving(true);
@@ -550,7 +571,88 @@ function SettingsPage({ health, refresh }: { health: ApiHealth | null; refresh: 
     }
   }
 
-  return <section className="panel data-page settings-page"><PanelHead title="Model Settings" action={saving ? "Applying" : "Apply"} onAction={save} /><div className="settings-intro"><strong>Configure the reasoning model used by Agent Chat.</strong><span>API keys are write-only and never returned by the API. Runtime changes last until the application API restarts.</span></div><div className="settings-form"><label><span>Provider</span><select value={provider} onChange={(event) => { setProvider(event.target.value); if (event.target.value === "DeepSeek") { setBaseUrl("https://api.deepseek.com"); setModel("deepseek-chat"); } }}><option>DeepSeek</option><option>OpenAI-compatible</option></select></label><label><span>Model</span><input value={model} onChange={(event) => setModel(event.target.value)} placeholder="deepseek-chat" /></label><label><span>Base URL</span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.deepseek.com" /></label><label><span>Temperature <em>{temperature.toFixed(1)}</em></span><input type="range" min="0" max="2" step="0.1" value={temperature} onChange={(event) => setTemperature(Number(event.target.value))} /></label><label><span>Max output tokens</span><input type="number" min="256" max="128000" step="256" value={maxTokens} onChange={(event) => setMaxTokens(Number(event.target.value))} /></label><label><span>API Key <em>{health?.llm.api_key_configured ? "Configured" : "Required"}</em></span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Leave blank to keep current key" autoComplete="new-password" /></label></div><div className="settings-actions"><button className="primary-inline" disabled={saving || !model.trim()} onClick={save}>{saving ? "Applying..." : "Apply configuration"}</button><button className="secondary-inline" disabled={saving} onClick={reset}>Reset to .env</button></div>{message && <div className="settings-message">{message}</div>}<div className="settings-status"><span>Active provider</span><strong>{health?.llm.provider ?? "Not configured"}</strong><span>Active model</span><strong>{health?.llm.model ?? "-"}</strong><span>Key status</span><strong className={health?.llm.api_key_configured ? "tone-ok" : "tone-bad"}>{health?.llm.api_key_configured ? "Configured" : "Missing"}</strong></div></section>;
+  async function openIda() {
+    if (!idaPath.trim()) return;
+    setIdaBusy(true);
+    setMessage("");
+    try {
+      const result = await api.openIdaDatabase(idaPath.trim(), idaWritable);
+      setMessage(`IDA database opened: ${result.database}${result.writable ? " (writable)" : " (read-only)"}`);
+      await refresh();
+    } catch (exc) {
+      setMessage(String(exc));
+    } finally {
+      setIdaBusy(false);
+    }
+  }
+
+  async function closeIda(save: boolean) {
+    setIdaBusy(true);
+    setMessage("");
+    try {
+      await api.closeIdaDatabase(save);
+      setMessage(save ? "IDA database saved and closed." : "IDA database closed without saving.");
+      await refresh();
+    } catch (exc) {
+      setMessage(String(exc));
+    } finally {
+      setIdaBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel data-page settings-page">
+      <PanelHead title="Model Settings" action={saving ? "Applying" : "Apply"} onAction={save} />
+      <div className="settings-hero">
+        <div>
+          <strong>Agent Runtime Configuration</strong>
+          <span>Change the active model without exposing API keys in the UI. Runtime changes last until the API restarts.</span>
+        </div>
+        <div className="settings-badges">
+          <span className={health?.llm.configured ? "ok" : "bad"}>{health?.llm.configured ? "LLM ready" : "Missing key"}</span>
+          <span className={health?.patching?.enabled ? "warn" : "neutral"}>{health?.patching?.enabled ? "Write tools enabled" : "Read-only tools"}</span>
+        </div>
+      </div>
+      <div className="settings-layout">
+        <div className="table-card settings-card">
+          <div className="table-head"><strong>Provider</strong><span>{provider}</span></div>
+          <div className="settings-form">
+            <label><span>Provider</span><select value={provider} onChange={(event) => { setProvider(event.target.value); if (event.target.value === "DeepSeek") { setBaseUrl("https://api.deepseek.com"); setModel("deepseek-v4-flash"); } }}><option>DeepSeek</option><option>OpenAI-compatible</option></select></label>
+            <label><span>Model</span><input value={model} onChange={(event) => setModel(event.target.value)} placeholder="deepseek-v4-flash" /></label>
+            <label><span>Base URL</span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.deepseek.com" /></label>
+            <label><span>Temperature <em>{temperature.toFixed(1)}</em></span><input type="range" min="0" max="2" step="0.1" value={temperature} onChange={(event) => setTemperature(Number(event.target.value))} /></label>
+            <label><span>Max output tokens</span><input type="number" min="256" max="128000" step="256" value={maxTokens} onChange={(event) => setMaxTokens(Number(event.target.value))} /></label>
+            <label><span>API Key <em>{health?.llm.api_key_configured ? "Configured" : "Required"}</em></span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Leave blank to keep current key" autoComplete="new-password" /></label>
+          </div>
+          <div className="settings-actions"><button className="primary-inline" disabled={saving || !model.trim()} onClick={save}>{saving ? "Applying..." : "Apply configuration"}</button><button className="secondary-inline" disabled={saving} onClick={reset}>Reset to .env</button></div>
+          {message && <div className="settings-message">{message}</div>}
+        </div>
+        <div className="table-card settings-card ida-control-card">
+          <div className="table-head"><strong>IDA Database</strong><span className={health?.ida.connected ? "state ok" : "state bad"}>{health?.ida.connected ? "Connected" : "Offline"}</span></div>
+          <div className="settings-form">
+            <label><span>IDB / ELF Path</span><input value={idaPath} onChange={(event) => setIdaPath(event.target.value)} placeholder="E:\\firmware\\squashfs-root\\bin\\boa or /path/to/file.i64" /></label>
+            <label className="checkbox-label"><input type="checkbox" checked={idaWritable} onChange={(event) => setIdaWritable(event.target.checked)} /><span>Request writable session for patch/export operations</span></label>
+          </div>
+          <div className="settings-actions">
+            <button className="primary-inline" disabled={idaBusy || !idaPath.trim()} onClick={openIda}>{idaBusy ? "Working..." : "Open Database"}</button>
+            <button className="secondary-inline" disabled={idaBusy || !health?.ida.connected} onClick={() => closeIda(false)}>Close</button>
+            <button className="secondary-inline" disabled={idaBusy || !health?.ida.connected} onClick={() => closeIda(true)}>Save & Close</button>
+          </div>
+        </div>
+        <div className="table-card settings-card runtime-card">
+          <div className="table-head"><strong>Active Runtime</strong><span>{health?.llm.provider ?? "Not configured"}</span></div>
+          <dl className="settings-status">
+            <dt>Provider</dt><dd>{health?.llm.provider ?? "Not configured"}</dd>
+            <dt>Model</dt><dd>{health?.llm.model ?? "-"}</dd>
+            <dt>Base URL</dt><dd>{health?.llm.base_url ?? "-"}</dd>
+            <dt>API Key</dt><dd><span className={health?.llm.api_key_configured ? "state ok" : "state bad"}>{health?.llm.api_key_configured ? "Configured" : "Missing"}</span></dd>
+            <dt>IDA Backend</dt><dd><span className={health?.ida.connected ? "state ok" : "state bad"}>{health?.ida.connected ? "Connected" : "Offline"}</span></dd>
+            <dt>Write Tools</dt><dd><span className={health?.patching?.enabled ? "state warn" : "state ok"}>{health?.patching?.enabled ? "Enabled" : "Disabled"}</span></dd>
+          </dl>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 const MarkdownBody = memo(function MarkdownBody({ content }: { content: string }) { return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown></div>; });
@@ -560,6 +662,11 @@ function shortToolContent(content: string, limit: number) { const parsed = parse
 
 function SessionsPage(props: { threads: ChatThread[]; activeThreadId: string; busy: boolean; createChat: () => void; loadChatThread: (id: string) => void; renameChat: (id?: string) => void; clearChat: (id?: string) => void; deleteChat: (id?: string) => void; }) {
   const activeThread = props.threads.find((thread) => thread.id === props.activeThreadId);
+  const [query, setQuery] = useState("");
+  const filteredThreads = props.threads.filter((thread) => {
+    const haystack = `${thread.title} ${thread.id} ${thread.sample_id ?? ""}`.toLowerCase();
+    return haystack.includes(query.trim().toLowerCase());
+  });
   return (
     <section className="panel data-page sessions-page">
       <PanelHead title="Investigation Sessions" action={props.busy ? "Working" : "New Session"} onAction={props.createChat} />
@@ -569,10 +676,17 @@ function SessionsPage(props: { threads: ChatThread[]; activeThreadId: string; bu
         <MiniMetric label="Latest Update" value={props.threads[0]?.updated_at?.slice(0, 10) || "-"} hint="Most recent thread" />
         <MiniMetric label="Storage" value="SQLite" hint="Chat history persisted" tone="ok" />
       </div>
+      <div className="sessions-toolbar">
+        <div>
+          <strong>Session Manager</strong>
+          <span>Open, rename, clear, or delete persisted Agent conversations.</span>
+        </div>
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search title, thread id, or sample..." />
+      </div>
       <div className="table-card sessions-card">
-        <div className="table-head"><strong>Saved Investigation Threads</strong><span>{props.threads.length} total</span></div>
+        <div className="table-head"><strong>Saved Investigation Threads</strong><span>{filteredThreads.length} shown</span></div>
         <div className="session-list">
-          {props.threads.map((thread) => (
+          {filteredThreads.map((thread) => (
             <article key={thread.id} className={thread.id === props.activeThreadId ? "active" : ""}>
               <div className="session-title">
                 <strong>{thread.title || "New investigation"}</strong>
@@ -592,6 +706,7 @@ function SessionsPage(props: { threads: ChatThread[]; activeThreadId: string; bu
             </article>
           ))}
           {props.threads.length === 0 && <div className="empty-state">No investigation session has been created. Start a new session before Agent Chat analysis.</div>}
+          {props.threads.length > 0 && filteredThreads.length === 0 && <div className="empty-state">No session matches the current search.</div>}
         </div>
       </div>
     </section>
@@ -640,7 +755,7 @@ function FirmwareTriagePage(props: { root: string; setRoot: (value: string) => v
           </div>
           <div className="firmware-layout">
             <div className="table-card">
-              <div className="table-head"><strong>Recommended IDA Targets</strong><span>{props.report.root}</span></div>
+              <div className="table-head"><strong>Recommended IDA Targets</strong><span className="path-tail" title={props.report.root}>{props.report.root}</span></div>
               <div className="firmware-candidates">
                 {props.report.candidates.map((candidate) => (
                   <button key={candidate.relative_path} className={selected?.relative_path === candidate.relative_path ? "active" : ""} onClick={() => props.setSelectedPath(candidate.relative_path)}>
@@ -770,6 +885,16 @@ function IntelPage(props: { form: IntelFormState; setForm: (value: IntelFormStat
   return (
     <section className="panel data-page intel-page">
       <PanelHead title="CVE Intelligence" action={props.busy ? "Searching" : "Search"} onAction={props.searchIntel} />
+      <div className="intel-command-strip">
+        <div>
+          <strong>Public query</strong>
+          <code>{queryPreview || "Vendor Product Firmware"}</code>
+        </div>
+        <div>
+          <strong>Assessment</strong>
+          <span className={`state ${props.result?.assessment === "lookup_failed" ? "bad" : props.result?.assessment === "likely_known_vulnerability" ? "ok" : "neutral"}`}>{formatAssessment(props.result?.assessment)}</span>
+        </div>
+      </div>
       <div className="intel-layout">
         <div className="intel-query table-card">
           <div className="table-head"><strong>Known Vulnerability Lookup</strong><span>Broad search, local rerank</span></div>

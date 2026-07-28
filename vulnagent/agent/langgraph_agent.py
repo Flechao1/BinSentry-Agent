@@ -32,7 +32,7 @@ from vulnagent.reports import FileReportStore
 from vulnagent.skills import load_skill
 from vulnagent.storage import SqliteVulnRepository
 from vulnagent.tools.langchain_tools import build_readonly_ida_tools
-from vulnagent.tools.langgraph_write_tools import build_confirmed_write_tools
+from vulnagent.tools.langgraph_write_tools import build_confirmed_write_tools, build_direct_write_tools
 
 
 ModelFactory = Callable[[RunnableConfig], BaseChatModel]
@@ -167,6 +167,7 @@ def build_binary_vulnerability_agent(
     ida_backend_url: str | None = None,
     report_dir: str | Path | None = None,
     include_write_tools: bool = False,
+    confirm_write_tools: bool = True,
 ):
     """Build a graph suitable for registration in agent-service-toolkit."""
     base_url = ida_backend_url or os.getenv("IDA_BACKEND_URL", "http://127.0.0.1:8765")
@@ -178,11 +179,21 @@ def build_binary_vulnerability_agent(
     tools = list(readonly_tools)
     tools_by_name = {tool.name: tool for tool in tools}
     if include_write_tools:
-        write_tools = build_confirmed_write_tools(
+        write_tool_builder = build_confirmed_write_tools if confirm_write_tools else build_direct_write_tools
+        write_tools = write_tool_builder(
             lambda: AsyncIdaClient(base_url, timeout=tool_timeout),
         )
         tools.extend(write_tools)
         tools_by_name.update({tool.name: tool for tool in write_tools})
+    write_policy = (
+        "\nWrite tools are available. Only use them when the user explicitly asks to modify, "
+        "patch, rename, comment, or save the IDA database. Before patching bytes or jumps, "
+        "collect enough evidence to name the target address, original bytes when available, "
+        "patched bytes or mode, and the reason. After a write tool returns, report the exact "
+        "result and whether a database save is still needed.\n"
+        if include_write_tools
+        else "\nWrite tools are not available in this run. Do not claim you can patch or modify the binary.\n"
+    )
 
     instructions = f"""
 You are a binary vulnerability analysis Agent for Web/CGI firmware.
@@ -197,6 +208,7 @@ Many tools return vulnagent.tool_result.v1 JSON. Read the JSON `text` field for 
 human-readable details, and use structured fields such as confirmed_routes,
 confirmed_sources, pending_sinks, missing_evidence, verified_findings, and
 function_notes to maintain investigation status.
+{write_policy}
 
 Follow this playbook:
 {load_skill("firmware_web_audit")}

@@ -181,29 +181,23 @@ copy .env.example .env
 ```env
 DEEPSEEK_API_KEY=your-api-key
 DEEPSEEK_API_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-v4-flash
 
 IDA_BACKEND_URL=http://127.0.0.1:8765
 VULN_DB_PATH=./data/vulnagent.db
+VULN_ENABLE_IDB_WRITES=false
+VULN_AGENT_DIRECT_IDB_WRITES=false
 ```
 
 不要提交 `.env`、IDA 数据库、SQLite 数据库、固件样本或本地报告。
 
-### 3. 启动 IDA 后端
-
-```powershell
-python -m vulnagent --idb "E:\path\to\sample.i64" --host 127.0.0.1 --port 8765 --read-only
-```
-
-如果是固件目录模式，可以先启动前端扫描 rootfs，选择推荐二进制后再启动 IDA 后端。
-
-### 4. 启动应用 API
+### 3. 启动应用 API
 
 ```powershell
 python -m vulnagent api --host 127.0.0.1 --port 8787
 ```
 
-### 5. 启动 React 前端
+### 4. 启动 React 前端
 
 ```powershell
 cd frontend
@@ -215,6 +209,66 @@ npm run dev
 
 ```text
 http://127.0.0.1:5173
+```
+
+### Agent direct patch mode
+
+Agent Chat can mutate the active IDA database when direct write tools are enabled.
+Use this only on a copied IDB/input file.
+
+Enable the API write gate:
+
+```env
+VULN_ENABLE_IDB_WRITES=true
+VULN_AGENT_DIRECT_IDB_WRITES=true
+```
+
+Restart the IDA backend without `--read-only`:
+
+```powershell
+python -m vulnagent --idb "E:\path\to\target.i64" --host 127.0.0.1 --port 8765
+```
+
+Then ask Agent Chat to patch, NOP, rename, comment, or save. Supported operations:
+
+- patch exact bytes with optional `expected_original_hex`
+- NOP bytes
+- invert / force conditional jumps
+- rename function
+- set function comment
+- save IDA database
+
+Keep `VULN_AGENT_DIRECT_IDB_WRITES=false` unless you want the Agent to execute patch
+operations directly from chat.
+
+### 5. 选择启动模式
+
+如果已经知道要分析的二进制文件，直接进入 **Binary Mode**：
+
+```powershell
+python -m vulnagent --idb "E:\path\to\sample.i64" --host 127.0.0.1 --port 8765 --read-only
+```
+
+如果还不确定应该分析哪个二进制文件，先进入 **Firmware Directory Mode**：
+
+```text
+打开前端 -> Firmware Triage -> 输入 squashfs-root / rootfs 目录 -> Scan Firmware
+```
+
+前端会根据 Web/CGI 特征、危险函数、配置引用、路由字符串等指标推荐重点二进制。选择目标后，再用推荐路径启动 IDA 后端：
+
+```powershell
+python -m vulnagent --idb "E:\path\to\squashfs-root\sbin\lighttpd" --host 127.0.0.1 --port 8765 --read-only
+```
+
+推荐的使用顺序：
+
+```text
+未知目标二进制：
+  API -> React 前端 -> Firmware Triage -> 选择二进制 -> IDA 后端 -> Agent Chat
+
+已知目标二进制：
+  API -> IDA 后端 -> React 前端 -> Agent Chat
 ```
 
 ## 常用命令

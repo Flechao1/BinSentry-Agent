@@ -134,11 +134,6 @@ class ValidationPlanner:
         return self.evaluate(candidate)
 
     def evaluate(self, candidate: CandidateFinding) -> CandidateFinding:
-        if not candidate.callee_ea:
-            candidate.status = "unverified"
-            candidate.conclusion = "The sink target address is unavailable; argument origin cannot be traced reliably."
-            candidate.missing_evidence.append("Resolve the sink callee address in IDA.")
-            return candidate
         if not candidate.arguments:
             candidate.status = "rejected"
             candidate.confidence = 0.1
@@ -170,6 +165,15 @@ class ValidationPlanner:
             candidate.missing_evidence = [
                 "Confirm runtime reachability and any command-specific allowlist before exploitation testing."
             ]
+            return candidate
+
+        if not candidate.callee_ea:
+            candidate.status = "unverified"
+            candidate.conclusion = (
+                "The sink target address is unavailable; argument origin could not be "
+                "proven by the available fallback evidence."
+            )
+            candidate.missing_evidence.append("Resolve the sink callee address in IDA.")
             return candidate
 
         candidate.status = "unverified"

@@ -50,7 +50,8 @@ class StandaloneBinaryVulnerabilityAgent:
             lambda config: build_chat_model(self.llm_settings),
             ida_backend_url=self.ida_backend_url,
             report_dir=self.report_dir,
-            include_write_tools=False,
+            include_write_tools=_env_bool("VULN_ENABLE_IDB_WRITES"),
+            confirm_write_tools=not _env_bool("VULN_AGENT_DIRECT_IDB_WRITES"),
         )
 
     async def ask(
@@ -79,3 +80,7 @@ class StandaloneBinaryVulnerabilityAgent:
         complete_history = sanitize_provider_message_order([*history, *generated_messages])
         self.context_builder.record(thread_id, complete_history)
         return complete_history
+
+
+def _env_bool(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}

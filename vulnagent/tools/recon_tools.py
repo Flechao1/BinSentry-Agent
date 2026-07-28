@@ -341,6 +341,159 @@ class IdaReconTools:
             missing_evidence=missing_evidence,
         )
 
+    def investigate_vulnerability_candidates(
+        self,
+        category: str = "all",
+        roots: str = "",
+        sources: str = "",
+        max_candidates: int = 8,
+        max_depth: int = 8,
+        max_functions: int = 500,
+    ) -> str:
+        """Scan sinks and validate the highest-priority candidates in one bounded pass.
+
+        This is the high-level verification loop for the Agent. It deliberately
+        returns conservative statuses instead of treating a dangerous API call as
+        a vulnerability. ``category`` accepts ``all``, ``command-injection``, or
+        ``memory-safety``.
+        """
+        category = category.strip().lower() or "all"
+        if category not in {"all", "command-injection", "memory-safety"}:
+            return _json_result(
+                f"Unsupported vulnerability category: {category}",
+                missing_evidence=[{
+                    "reason": "Use category all, command-injection, or memory-safety.",
+                }],
+            )
+        max_candidates = max(1, min(int(max_candidates), 30))
+        max_depth = max(0, min(int(max_depth), 32))
+        max_functions = max(1, min(int(max_functions), 2000))
+
+        specs = get_default_sink_specs()
+        if category == "command-injection":
+            specs = {
+                name: value for name, value in specs.items()
+                if name.lower() in {
+                    "system", "popen", "exec", "execl", "execlp", "execle",
+                    "execv", "execvp", "execve", "dosystem",
+                }
+            }
+        elif category == "memory-safety":
+            specs = {
+                name: value for name, value in specs.items()
+                if name.lower() in {
+                    "strcpy", "strcat", "sprintf", "vsprintf", "memcpy", "memmove",
+                }
+            }
+
+        root_list = [item.strip() for item in roots.split(",") if item.strip()]
+        source_list = [item.strip() for item in sources.split(",") if item.strip()]
+        scan = self.client.scan_sink_calls(
+            specs,
+            roots=root_list,
+            max_depth=max_depth,
+            max_functions=max_functions,
+        )
+        sinks = sorted(
+            scan.results,
+            key=lambda item: (
+                1 if item.sink_name.lower() in {
+                    "system", "popen", "exec", "execl", "execlp", "execle",
+                    "execv", "execvp", "execve", "dosystem",
+                } else 0,
+                float(item.score),
+                len(item.args),
+            ),
+            reverse=True,
+        )[:max_candidates]
+
+        candidates = []
+        errors: list[str] = []
+        for sink in sinks:
+            try:
+                candidates.append(
+                    self.validation_planner.validate(
+                        sink,
+                        self.client,
+                        known_sources=source_list or None,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve an auditable candidate
+                candidate = self.validation_planner.plan(sink)
+                candidate.status = "unverified"
+                candidate.conclusion = (
+                    "Automatic argument-origin validation failed; manual review is required."
+                )
+                candidate.missing_evidence.append(
+                    f"Retry argument tracing after tool error: {type(exc).__name__}: {exc}"
+                )
+                candidates.append(candidate)
+                errors.append(f"{candidate.candidate_id}: {type(exc).__name__}: {exc}")
+
+        counts = {
+            status: sum(candidate.status == status for candidate in candidates)
+            for status in ("verified", "unverified", "rejected")
+        }
+        lines = [
+            f"Candidate investigation: category={category}",
+            f"Scope={scan.scope}; scanned_functions={scan.scanned_functions}; "
+            f"sink_calls={len(scan.results)}; truncated={scan.truncated}",
+            f"Validated={len(candidates)}; verified={counts['verified']}; "
+            f"unverified={counts['unverified']}; rejected={counts['rejected']}",
+        ]
+        for candidate in candidates:
+            lines.append(
+                f"[{candidate.status.upper()}] {candidate.category} "
+                f"{candidate.sink_name} @ {candidate.sink_ea} "
+                f"confidence={candidate.confidence:.2f}: {candidate.conclusion}"
+            )
+            for evidence in candidate.evidence[:4]:
+                lines.append(f"  evidence: {evidence}")
+            for missing in candidate.missing_evidence[:3]:
+                lines.append(f"  next: {missing}")
+
+        pending = [
+            {
+                "sink_name": candidate.sink_name,
+                "sink_ea": candidate.sink_ea,
+                "caller_name": candidate.caller_name,
+                "caller_ea": candidate.caller_ea,
+                "category": candidate.category,
+                "reason": candidate.conclusion,
+            }
+            for candidate in candidates
+            if candidate.status == "unverified"
+        ]
+        missing = [
+            {"candidate_id": candidate.candidate_id, "reason": reason}
+            for candidate in candidates
+            for reason in candidate.missing_evidence
+        ]
+        return _json_result(
+            "\n".join(lines),
+            candidate_findings=[candidate.model_dump(mode="json") for candidate in candidates],
+            pending_sinks=pending,
+            missing_evidence=missing,
+            verified_findings=[
+                candidate.model_dump(mode="json")
+                for candidate in candidates
+                if candidate.status == "verified"
+            ],
+            function_notes=[{
+                "note": "Candidate investigation completed in one bounded scan/validation pass.",
+                "scope": scan.scope,
+                "scanned_functions": scan.scanned_functions,
+                "sink_calls": len(scan.results),
+                "truncated": scan.truncated,
+            }],
+            validation_summary={
+                "category": category,
+                "counts": counts,
+                "max_candidates": max_candidates,
+                "errors": errors,
+            },
+        )
+
     def validate_sink_candidate(
         self,
         caller_ea: int | str,

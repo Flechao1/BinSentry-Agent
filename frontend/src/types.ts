@@ -23,6 +23,17 @@ export type ApiHealth = {
     db_path: string;
     summary: Record<string, number>;
   };
+  patching?: {
+    enabled: boolean;
+    available: boolean;
+  };
+};
+
+export type IdaOpenResponse = {
+  session_id: string;
+  idb_path: string;
+  database: string;
+  writable: boolean;
 };
 
 export type HarnessRun = {

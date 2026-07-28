@@ -13,6 +13,9 @@ from vulnagent.ida.schemas import (
     FunctionEntry,
     ImportEntry,
     IndirectCallScanResult,
+    ExportPatchedBinaryResponse,
+    OpenSessionRequest,
+    OpenSessionResponse,
     RenameFunctionResponse,
     NopBytesRequest,
     PatchBytesResponse,
@@ -66,6 +69,10 @@ def format_address(ea: int) -> str:
 class IdaBackend(ABC):
     @abstractmethod
     def health(self) -> dict[str, str]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def open_database(self, request: OpenSessionRequest) -> OpenSessionResponse:
         raise NotImplementedError
 
     @abstractmethod
@@ -143,6 +150,15 @@ class IdaBackend(ABC):
 
     @abstractmethod
     def save_database(self, output_path: str | None = None) -> SaveDatabaseResponse:
+        raise NotImplementedError
+
+    @abstractmethod
+    def export_patched_binary(
+        self,
+        output_path: str | None = None,
+        overwrite: bool = False,
+        source_path: str | None = None,
+    ) -> ExportPatchedBinaryResponse:
         raise NotImplementedError
 
     @abstractmethod
@@ -240,6 +256,9 @@ class UnavailableIdaBackend(IdaBackend):
             "reason": self.reason,
         }
 
+    def open_database(self, request: OpenSessionRequest) -> OpenSessionResponse:
+        raise IdaBackendUnavailable(self.reason)
+
     def get_function_context(self, ea: int) -> FunctionContext:
         raise IdaBackendUnavailable(self.reason)
 
@@ -300,6 +319,14 @@ class UnavailableIdaBackend(IdaBackend):
         raise IdaBackendUnavailable(self.reason)
 
     def save_database(self, output_path: str | None = None) -> SaveDatabaseResponse:
+        raise IdaBackendUnavailable(self.reason)
+
+    def export_patched_binary(
+        self,
+        output_path: str | None = None,
+        overwrite: bool = False,
+        source_path: str | None = None,
+    ) -> ExportPatchedBinaryResponse:
         raise IdaBackendUnavailable(self.reason)
 
     def close_database(self, save: bool = False) -> None:

@@ -161,6 +161,22 @@ class SaveDatabaseResponse(BaseModel):
     message: str = ""
 
 
+class ExportPatchedBinaryRequest(BaseModel):
+    output_path: str = ""
+    overwrite: bool = False
+    source_path: str = ""
+
+
+class ExportPatchedBinaryResponse(BaseModel):
+    path: str
+    source_path: str = ""
+    ok: bool
+    patched_bytes: int = 0
+    skipped_bytes: int = 0
+    mismatched_bytes: int = 0
+    message: str = ""
+
+
 class CloseDatabaseRequest(BaseModel):
     save: bool = False
 

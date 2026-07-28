@@ -40,7 +40,7 @@ class LlmSettings:
                 provider="DeepSeek",
                 api_key=deepseek_key,
                 base_url=os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com").strip(),
-                model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip(),
+                model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash").strip(),
                 temperature=float(os.getenv("LLM_TEMPERATURE", "0.0")),
                 max_tokens=int(os.getenv("VULN_CONTEXT_RESPONSE_RESERVE_TOKENS", "2400")),
             )

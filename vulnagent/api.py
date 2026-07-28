@@ -31,6 +31,17 @@ from vulnagent.harness import (
     HarnessTraceEvent,
     HarnessTurnRequest,
 )
+from vulnagent.ida.schemas import (
+    CloseDatabaseRequest,
+    ExportPatchedBinaryRequest,
+    NopBytesRequest,
+    OpenSessionRequest,
+    PatchBytesRequest,
+    PatchConditionalJumpRequest,
+    RenameFunctionRequest,
+    SaveDatabaseRequest,
+    SetFunctionCommentRequest,
+)
 from vulnagent.intel import IntelQuery, VulnerabilityIntelService
 from vulnagent.reports import FileReportStore
 from vulnagent.storage import SqliteVulnRepository
@@ -93,6 +104,30 @@ class VulnerabilityIntelRequest(BaseModel):
     )
 
 
+class PatchBytesApiRequest(PatchBytesRequest):
+    ea: str = Field(..., min_length=1)
+
+
+class NopBytesApiRequest(NopBytesRequest):
+    ea: str = Field(..., min_length=1)
+
+
+class PatchConditionalJumpApiRequest(PatchConditionalJumpRequest):
+    ea: str = Field(..., min_length=1)
+
+
+class RenameFunctionApiRequest(RenameFunctionRequest):
+    ea: str = Field(..., min_length=1)
+
+
+class SetFunctionCommentApiRequest(SetFunctionCommentRequest):
+    ea: str = Field(..., min_length=1)
+
+
+class ExportPatchedBinaryApiRequest(ExportPatchedBinaryRequest):
+    pass
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="VulnAgent Application API")
     app.add_middleware(
@@ -129,6 +164,10 @@ def create_app() -> FastAPI:
         return {
             "ida": ida_status,
             "llm": get_llm_status(),
+            "patching": {
+                "enabled": _writes_enabled(),
+                "available": _writes_enabled() and _backend_writable(ida_status.get("writable")),
+            },
             "storage": {
                 "db_path": str(repository.db_path),
                 "summary": repository.get_summary(),
@@ -168,6 +207,26 @@ def create_app() -> FastAPI:
     def reset_llm_configuration() -> dict[str, Any]:
         reset_runtime_llm_settings()
         return get_llm_status()
+
+    @app.post("/api/ida/open")
+    def open_ida_database(request: OpenSessionRequest) -> dict[str, Any]:
+        client = _ida_client()
+        try:
+            return client.open_database(
+                request.idb_path,
+                request.session_id,
+                request.writable,
+            ).model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/ida/close")
+    def close_ida_database(request: CloseDatabaseRequest) -> dict[str, Any]:
+        client = _ida_client()
+        try:
+            return {"ok": client.close_database(save=request.save)}
+        except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
 
     @app.get("/api/harness/runs")
     def list_harness_runs(limit: int = 20) -> list[dict[str, Any]]:
@@ -307,6 +366,90 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001 - expose frontend-readable detail
             raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
 
+    @app.post("/api/patch/bytes")
+    def patch_bytes(request: PatchBytesApiRequest) -> dict[str, Any]:
+        client = _writable_ida_client()
+        try:
+            return client.patch_bytes(
+                request.ea,
+                request.patched_hex,
+                request.expected_original_hex,
+                request.reason,
+            ).model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/patch/nop")
+    def nop_bytes(request: NopBytesApiRequest) -> dict[str, Any]:
+        client = _writable_ida_client()
+        try:
+            return client.nop_bytes(
+                request.ea,
+                request.size,
+                request.expected_original_hex,
+                request.reason,
+            ).model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/patch/conditional-jump")
+    def patch_conditional_jump(request: PatchConditionalJumpApiRequest) -> dict[str, Any]:
+        client = _writable_ida_client()
+        try:
+            return client.patch_conditional_jump(
+                request.ea,
+                request.mode,
+                request.expected_original_hex,
+                request.reason,
+            ).model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/patch/rename-function")
+    def rename_function_for_patch(request: RenameFunctionApiRequest) -> dict[str, Any]:
+        client = _writable_ida_client()
+        try:
+            return client.rename_function(
+                request.ea,
+                request.new_name,
+                request.reason,
+            ).model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/patch/comment-function")
+    def set_function_comment_for_patch(request: SetFunctionCommentApiRequest) -> dict[str, Any]:
+        client = _writable_ida_client()
+        try:
+            return client.set_function_comment(
+                request.ea,
+                request.comment,
+                request.repeatable,
+                request.reason,
+            ).model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/patch/save-database")
+    def save_patched_database(request: SaveDatabaseRequest) -> dict[str, Any]:
+        client = _writable_ida_client()
+        try:
+            return client.save_database(request.output_path).model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/patch/export-binary")
+    def export_patched_binary(request: ExportPatchedBinaryApiRequest) -> dict[str, Any]:
+        client = _writable_ida_client()
+        try:
+            return client.export_patched_binary(
+                request.output_path,
+                request.overwrite,
+                request.source_path,
+            ).model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
     @app.get("/api/functions/{ea}/context")
     def function_context(ea: str) -> dict[str, Any]:
         try:
@@ -353,6 +496,40 @@ def _timeout() -> float:
 
 def _ida_client() -> IdaClient:
     return IdaClient(_backend_url(), timeout=_timeout())
+
+
+def _writes_enabled() -> bool:
+    return os.getenv("VULN_ENABLE_IDB_WRITES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _backend_writable(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _writable_ida_client() -> IdaClient:
+    if not _writes_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="IDB writes are disabled. Set VULN_ENABLE_IDB_WRITES=true and restart the API.",
+        )
+    client = _ida_client()
+    try:
+        backend = client.validate_protocol()
+    except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+        raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+    if not _backend_writable(backend.writable):
+        raise HTTPException(
+            status_code=400,
+            detail="IDA backend is read-only. Restart it without --read-only before patching.",
+        )
+    return client
 
 
 def _report_store() -> FileReportStore:

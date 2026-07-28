@@ -23,6 +23,7 @@ DISCOVERY_SCAN_TOOLS = {
     "scan_taint_source_candidates",
     "propagate_taint_sources",
     "scan_dangerous_sink_calls",
+    "investigate_vulnerability_candidates",
 }
 FOCUSED_ANALYSIS_TOOLS = {
     "analyze_function_as_source",
