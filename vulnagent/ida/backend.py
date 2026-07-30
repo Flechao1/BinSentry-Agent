@@ -71,6 +71,7 @@ def _api_error(exc: Exception) -> None:
 def create_app(backend: IdaBackend | None = None) -> Any:
     app = _new_app(title="VulnAgent IDA Backend")
     app.state.backend = backend or UnavailableIdaBackend()
+    app.state.shutdown_callback = None
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -362,6 +363,18 @@ def create_app(backend: IdaBackend | None = None) -> Any:
         except Exception as exc:  # noqa: BLE001
             _api_error(exc)
 
+    @app.post("/shutdown")
+    async def shutdown_backend(request: CloseDatabaseRequest) -> dict[str, Any]:
+        try:
+            app.state.backend.close_database(save=request.save)
+        except Exception as exc:  # noqa: BLE001
+            _api_error(exc)
+
+        shutdown_callback = getattr(app.state, "shutdown_callback", None)
+        if callable(shutdown_callback):
+            shutdown_callback()
+        return {"ok": True, "message": "IDA backend shutdown scheduled"}
+
     return app
 
 
@@ -384,7 +397,9 @@ def main() -> None:
 
     backend = IdalibBackend(args.idb, writable=not args.read_only)
     app = create_app(backend)
-    uvicorn.run(app, host=args.host, port=args.port)
+    server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port))
+    app.state.shutdown_callback = lambda: setattr(server, "should_exit", True)
+    server.run()
 
 
 if __name__ == "__main__":

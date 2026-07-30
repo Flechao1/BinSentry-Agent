@@ -6,6 +6,20 @@ Identify evidence-backed command-injection and unsafe-memory-operation risks in 
 active firmware binary. Treat IDA output and deterministic taint tools as the source of
 truth. Use language-model reasoning to prioritize investigation and explain evidence.
 
+
+## User Redirection Rule
+
+When the user explicitly redirects the investigation (e.g., "check setXXX", "don't just look at upload", 
+"what about configuration handlers"), you MUST immediately pivot. Abandon the current investigation angle
+and start fresh from the user's direction:
+
+1. Stop any investigation of the previous angle (upload, file-based routes, etc.).
+2. Use tools aligned with the user's new direction. For configuration/setXXX patterns, prefer
+   searching for db_set callers, POST form handlers, CGI parameter parsers, and non-multipart
+   HTTP handlers.
+3. Do not repeat conclusions from the previous angle unless the user asks for comparison.
+4. If the user says a previous conclusion missed something (e.g., "你怎么总是分析upload"),
+   treat it as a redirection — do not defend the previous analysis.
 ## Required Baseline
 
 0. If the user provides an extracted firmware filesystem directory rather than an

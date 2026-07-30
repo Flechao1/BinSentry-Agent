@@ -14,7 +14,7 @@ from vulnagent.reports import BinaryVulnerabilityReport
 
 
 HarnessMode = Literal["agent_chat", "baseline_scan"]
-HarnessStatus = Literal["completed", "failed"]
+HarnessStatus = Literal["completed", "failed", "canceled"]
 
 
 def _utc_now() -> datetime:
@@ -71,4 +71,3 @@ class HarnessRunResult(BaseModel):
     error: str = ""
     started_at: datetime = Field(default_factory=_utc_now)
     finished_at: datetime = Field(default_factory=_utc_now)
-

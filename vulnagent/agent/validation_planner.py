@@ -12,18 +12,61 @@ from vulnagent.ida.schemas import ArgumentOriginResult, SinkCallResult
 
 CandidateStatus = Literal["pending", "verified", "unverified", "rejected"]
 
-COMMAND_SINKS = {"system", "popen", "exec", "execl", "execlp", "execle", "execv", "execvp", "execve", "dosystem"}
-MEMORY_SINKS = {"strcpy", "strcat", "sprintf", "vsprintf", "memcpy", "memmove"}
+COMMAND_SINKS = {
+    "system",
+    "popen",
+    "exec",
+    "execl",
+    "execlp",
+    "execle",
+    "execv",
+    "execvp",
+    "execve",
+    "dosystem",
+    "do_system",
+    "eval",
+    "fork_exec",
+    "twsystem",
+    "cstesystem",
+}
+MEMORY_SINKS = {
+    "strcpy",
+    "strcat",
+    "strncat",
+    "sprintf",
+    "vsprintf",
+    "sscanf",
+    "memcpy",
+    "memmove",
+    "gets",
+}
 REMOTE_SOURCE_HINTS = (
     "webs",
     "cgi",
     "http",
+    "https",
     "request",
+    "req",
     "query",
     "form",
+    "post",
+    "get",
     "cookie",
     "header",
+    "param",
+    "parameter",
+    "upload",
+    "uri",
+    "url",
+    "soap",
+    "xml",
+    "json",
+    "ubus",
+    "nvram",
+    "config",
     "recv",
+    "recvfrom",
+    "read",
     "socket",
 )
 
@@ -179,6 +222,8 @@ class ValidationPlanner:
         candidate.status = "unverified"
         candidate.confidence = 0.65 if remote_inputs else 0.35
         if remote_inputs:
+            candidate.confidence = max(candidate.confidence, 0.75)
+            candidate.severity = "high"
             candidate.conclusion = (
                 "A remote-input source reaches a memory-operation argument, but destination size "
                 "and effective bounds checks are not yet proven."

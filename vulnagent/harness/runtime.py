@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from vulnagent.agent.baseline_scan import BaselineScanner, ScanProgress
 from vulnagent.agent.standalone import StandaloneBinaryVulnerabilityAgent
@@ -91,6 +92,35 @@ class BinaryVulnAgentHarness:
                 answer=answer,
                 messages=messages,
                 tool_events=tool_events,
+                trace_events=trace,
+                started_at=trace[0].created_at,
+                finished_at=trace[-1].created_at,
+            )
+            self._persist_result(result)
+            return result
+        except asyncio.CancelledError:
+            trace.append(
+                self._event(
+                    run_id,
+                    "run_canceled",
+                    "Agent chat run canceled",
+                    {"thread_id": request.thread_id},
+                )
+            )
+            messages = [
+                *request.messages,
+                HumanMessage(content=request.prompt),
+                AIMessage(content="Request canceled by user before completion."),
+            ]
+            if request.thread_id:
+                self.repository.save_chat_messages(request.thread_id, messages)
+            result = HarnessRunResult(
+                run_id=run_id,
+                mode="agent_chat",
+                status="canceled",
+                thread_id=request.thread_id,
+                answer="Request canceled by user before completion.",
+                messages=messages,
                 trace_events=trace,
                 started_at=trace[0].created_at,
                 finished_at=trace[-1].created_at,

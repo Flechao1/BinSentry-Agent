@@ -46,6 +46,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ save })
     }),
+  shutdownIdaBackend: (save = false) =>
+    request<{ ok: boolean }>("/api/ida/shutdown", {
+      method: "POST",
+      body: JSON.stringify({ save })
+    }),
   runs: () => request<HarnessRun[]>("/api/harness/runs?limit=12"),
   run: (id: string) => request<HarnessRunDetail>(`/api/harness/runs/${id}`),
   reports: () => request<ReportSummary[]>("/api/reports?limit=20"),
@@ -92,11 +97,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(query)
     }),
-  chat: (prompt: string, threadId = "") =>
+  cancelChat: (threadId: string) =>
+    request<{ canceled: boolean; detail?: string; run_id?: string; status?: string; thread_id?: string }>("/api/agent/chat/cancel", {
+      method: "POST",
+      body: JSON.stringify({ thread_id: threadId })
+    }),
+  chat: (prompt: string, threadId = "", signal?: AbortSignal) =>
     request<AgentChatResponse>(
       "/api/agent/chat",
       {
         method: "POST",
+        signal,
         body: JSON.stringify({ prompt, thread_id: threadId, new_thread: !threadId })
       }
     ),

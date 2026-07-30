@@ -9,23 +9,23 @@ import type { AgentChatResponse, ApiHealth, CandidateFinding, ChatMessage, ChatT
 type View = "dashboard" | "firmware" | "sessions" | "chat" | "reports" | "candidates" | "functions" | "intel" | "runs" | "settings";
 
 const STARTER_PROMPTS = [
-  "Summarize discovered Web routes, source candidates, and dangerous sinks.",
-  "Scan likely user-input sources and separate confirmed sources from candidates.",
-  "Trace the argument source for the most suspicious system call.",
-  "Give me the next focused validation plan from the current baseline results."
+  "梳理当前样本的 Web 路由、输入源和危险函数调用。",
+  "扫描疑似用户输入点，区分已确认来源和候选来源。",
+  "追踪最可疑 system 调用的参数来源。",
+  "基于当前基线结果，给出下一步验证计划。"
 ];
 
 const NAV_ITEMS: Array<{ view: View; label: string; icon: string }> = [
-  { view: "dashboard", label: "Overview", icon: "⌂" },
-  { view: "firmware", label: "Firmware Triage", icon: "▣" },
-  { view: "sessions", label: "Sessions", icon: "▤" },
-  { view: "chat", label: "Agent Chat", icon: "✦" },
-  { view: "reports", label: "Findings", icon: "!" },
-  { view: "candidates", label: "Candidates", icon: "◌" },
-  { view: "functions", label: "Sources", icon: "⌘" },
-  { view: "intel", label: "CVE Intel", icon: "◎" },
-  { view: "runs", label: "Traces", icon: "≋" },
-  { view: "settings", label: "Model Settings", icon: "⚙" }
+  { view: "dashboard", label: "态势总览", icon: "OV" },
+  { view: "firmware", label: "固件分诊", icon: "FW" },
+  { view: "sessions", label: "调查会话", icon: "SS" },
+  { view: "chat", label: "Agent 对话", icon: "AI" },
+  { view: "reports", label: "漏洞发现", icon: "VF" },
+  { view: "candidates", label: "候选验证", icon: "CV" },
+  { view: "functions", label: "输入来源", icon: "SRC" },
+  { view: "intel", label: "CVE 情报", icon: "CVE" },
+  { view: "runs", label: "执行轨迹", icon: "TR" },
+  { view: "settings", label: "模型配置", icon: "CFG" }
 ];
 const ACTIVE_THREAD_STORAGE_KEY = "vulnagent.active_thread_id";
 
@@ -100,6 +100,9 @@ export function App() {
   const [intelResult, setIntelResult] = useState<IntelSearchResult | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const chatAbortRef = useRef<AbortController | null>(null);
+  const cancelingChatRef = useRef(false);
+  const activeChatThreadRef = useRef("");
 
   async function refresh() {
     const [healthData, runData, reportData, chatData] = await Promise.all([api.health(), api.runs(), api.reports(), api.chats()]);
@@ -156,15 +159,66 @@ export function App() {
     setError("");
     setShowChatDemo(false);
     setChatLog((items) => [...items, pendingMessage]);
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+    cancelingChatRef.current = false;
     try {
-      const result: AgentChatResponse = await api.chat(submitted, threadId);
+      let activeThreadId = threadId;
+      if (!activeThreadId) {
+        const thread = await api.createChat();
+        activeThreadId = thread.id;
+        setThreadId(thread.id);
+      }
+      activeChatThreadRef.current = activeThreadId;
+      const result: AgentChatResponse = await api.chat(submitted, activeThreadId, controller.signal);
       setThreadId(result.thread_id);
       setChatLog(result.messages?.length ? result.messages : [pendingMessage, { id: result.run_id, role: "assistant", content: result.status === "completed" ? result.answer : result.error }]);
       await refresh();
       setActiveRun(await api.run(result.run_id));
     } catch (exc) {
+      if (!cancelingChatRef.current) {
+        setError(String(exc));
+        seedChatDraft(submitted);
+      }
+    } finally {
+      if (chatAbortRef.current === controller) chatAbortRef.current = null;
+      activeChatThreadRef.current = "";
+      cancelingChatRef.current = false;
+      setBusy("");
+    }
+  }
+
+  async function cancelChat() {
+    if (busy !== "agent") return;
+    cancelingChatRef.current = true;
+    setError("");
+    const activeThreadId = activeChatThreadRef.current || threadId;
+    chatAbortRef.current?.abort();
+    try {
+      if (activeThreadId) await api.cancelChat(activeThreadId);
+      if (activeThreadId) {
+        const result = await api.chatMessages(activeThreadId);
+        setChatLog(result.messages);
+      }
+      await refresh();
+    } catch (exc) {
       setError(String(exc));
-      seedChatDraft(submitted);
+    } finally {
+      setBusy("");
+      chatAbortRef.current = null;
+      activeChatThreadRef.current = "";
+      cancelingChatRef.current = false;
+    }
+  }
+
+  async function closeIdaFromTopbar() {
+    setBusy("ida");
+    setError("");
+    try {
+      await api.shutdownIdaBackend(false);
+      await refresh();
+    } catch (exc) {
+      setError(String(exc));
     } finally {
       setBusy("");
     }
@@ -365,20 +419,20 @@ export function App() {
     <div className="agent-shell">
       <Sidebar view={view} setView={setView} health={health} reports={reports} chatThreads={chatThreads} activeThreadId={threadId} runScan={runScan} busy={busy} openReport={openReport} loadChatThread={loadChatThread} createChat={createChat} renameChat={renameChat} clearChat={clearChat} deleteChat={deleteChat} />
       <main className={`workspace view-${view}`}>
-        <Topbar health={health} activeReport={activeReport} refresh={refresh} openReport={openReport} busy={busy} />
+        <Topbar health={health} activeReport={activeReport} refresh={refresh} openReport={openReport} closeIda={closeIdaFromTopbar} busy={busy} />
         {error && <div className="error-banner">{error}</div>}
         {view === "dashboard" && <section className="kpi-row overview-kpis">
-          <Metric label="Findings" value={activeReport?.findings.length ?? 0} hint="Open issues" />
-          <Metric label="Warnings" value={highRisk} tone={highRisk > 0 ? "bad" : "neutral"} hint="High risk" />
-          <Metric label="Informational Sources" value={activeReport?.source_candidates.length ?? 0} hint="Collected" />
-          <Metric label="Verified" value={verified} tone="ok" hint="Confirmed" />
-          <Metric label="Backend" value={health?.ida.connected ? "Online" : "Offline"} tone={health?.ida.connected ? "ok" : "bad"} hint="IDA service" />
-          <Metric label="LLM Agent" value={health?.llm.configured ? "Configured" : "Missing Key"} tone={health?.llm.configured ? "ok" : "warn"} hint={health?.llm.provider ?? "DeepSeek"} />
+          <Metric label="漏洞发现" value={activeReport?.findings.length ?? 0} hint="当前报告" />
+          <Metric label="高危告警" value={highRisk} tone={highRisk > 0 ? "bad" : "neutral"} hint="Critical / High" />
+          <Metric label="输入来源" value={activeReport?.source_candidates.length ?? 0} hint="已收集" />
+          <Metric label="已验证" value={verified} tone="ok" hint="证据闭环" />
+          <Metric label="IDA 后端" value={health?.ida.connected ? "在线" : "离线"} tone={health?.ida.connected ? "ok" : "bad"} hint="分析服务" />
+          <Metric label="LLM Agent" value={health?.llm.configured ? "已配置" : "缺少 Key"} tone={health?.llm.configured ? "ok" : "warn"} hint={health?.llm.provider ?? "DeepSeek"} />
         </section>}
         {view !== "functions" && (
           <section className={`dashboard-grid focus-${view}`}>
             {view === "dashboard" && <OverviewPage activeReport={activeReport} reports={reports} runs={runs} openReport={openReport} openRun={openRun} />}
-            {view === "chat" && <ChatPanel draftSeed={chatDraftSeed} chatLog={chatLog} showDemo={showChatDemo} showToolCalls={showToolCalls} setShowToolCalls={setShowToolCalls} busy={busy === "agent"} submitChat={submitChat} clearChat={clearChat} createChat={createChat} threadTitle={chatThreads.find((thread) => thread.id === threadId)?.title ?? "New investigation"} />}
+            {view === "chat" && <ChatPanel draftSeed={chatDraftSeed} chatLog={chatLog} showDemo={showChatDemo} showToolCalls={showToolCalls} setShowToolCalls={setShowToolCalls} busy={busy === "agent"} submitChat={submitChat} cancelChat={cancelChat} clearChat={clearChat} createChat={createChat} threadTitle={chatThreads.find((thread) => thread.id === threadId)?.title ?? "New investigation"} />}
             {view === "sessions" && <SessionsPage threads={chatThreads} activeThreadId={threadId} busy={busy === "session"} createChat={createChat} loadChatThread={loadChatThread} renameChat={renameChat} clearChat={clearChat} deleteChat={deleteChat} />}
             {view === "firmware" && <FirmwareTriagePage root={firmwareRoot} setRoot={setFirmwareRoot} limit={firmwareLimit} setLimit={setFirmwareLimit} report={firmwareReport} selectedPath={selectedFirmwarePath} setSelectedPath={setSelectedFirmwarePath} busy={busy === "firmware"} runTriage={runFirmwareTriage} sendToChat={sendFirmwareTargetToChat} />}
             {view === "reports" && <FindingsPage reports={reports} activeReport={activeReport} openReport={openReport} />}
@@ -399,40 +453,40 @@ function Sidebar(props: { view: View; setView: (view: View) => void; health: Api
   const activeThread = props.chatThreads.find((thread) => thread.id === props.activeThreadId);
   return (
     <aside className="sidebar">
-      <div className="brand"><div className="brand-mark">VA</div><div><strong>VulnAgent</strong><span>Binary Agent Console</span></div></div>
-      <p className="sidebar-label">Workspace</p>
+      <div className="brand"><div className="brand-mark">VA</div><div><strong>VulnAgent</strong><span>Binary Evidence Console</span></div></div>
+      <p className="sidebar-label">工作区</p>
       <nav className="nav">{NAV_ITEMS.map((item) => <button key={item.view} className={props.view === item.view ? "active" : ""} onClick={() => props.setView(item.view)}><span>{item.icon}</span>{item.label}</button>)}</nav>
-      <p className="sidebar-label">Active Sample</p>
-      <SidebarFact label="Status" value={props.health?.ida.connected ? "Connected" : "Disconnected"} tone={props.health?.ida.connected ? "ok" : "bad"} />
-      <SidebarFact label="Backend" value={props.health?.ida.connected ? "Online" : "Offline"} />
-      <SidebarFact label="Arch / Bits" value={`${props.health?.ida.architecture ?? "-"} / ${props.health?.ida.bits ?? "-"}-bit`} />
-      <SidebarFact label="Protocol" value={props.health?.ida.protocol_version ?? "-"} />
+      <p className="sidebar-label">当前样本</p>
+      <SidebarFact label="状态" value={props.health?.ida.connected ? "已连接" : "未连接"} tone={props.health?.ida.connected ? "ok" : "bad"} />
+      <SidebarFact label="后端" value={props.health?.ida.connected ? "在线" : "离线"} />
+      <SidebarFact label="架构 / 位数" value={`${props.health?.ida.architecture ?? "-"} / ${props.health?.ida.bits ?? "-"}-bit`} />
+      <SidebarFact label="协议" value={props.health?.ida.protocol_version ?? "-"} />
       <p className="sidebar-label">LLM Agent</p>
-      <SidebarFact label="Provider" value={props.health?.llm.provider ?? "DeepSeek"} />
-      <SidebarFact label="Model" value={props.health?.llm.model ?? "deepseek-v4-flash"} />
-      <SidebarFact label="Status" value={props.health?.llm.configured ? "Configured" : "Missing Key"} tone={props.health?.llm.configured ? "ok" : "warn"} />
-      <p className="sidebar-label">Quick Actions</p>
-      <button className="danger-action" disabled={props.busy === "scan"} onClick={props.runScan}>{props.busy === "scan" ? "Scanning" : "Start Baseline Scan"}</button>
-      <p className="sidebar-label">Investigation Session</p>
-      <div className="session-current"><span>{short(activeThread?.title || "No session selected", 26)}</span><small>{activeThread ? `Updated ${activeThread.updated_at.slice(0, 10)}` : "Create or select a session"}</small></div>
-      <div className="session-actions"><button title="Create new investigation" aria-label="Create new investigation" disabled={props.busy === "session"} onClick={props.createChat}>+</button><button title="Rename current investigation" aria-label="Rename current investigation" disabled={!activeThread || props.busy === "session"} onClick={props.renameChat}>R</button><button title="Clear current conversation" aria-label="Clear current conversation" disabled={!activeThread || props.busy === "session"} onClick={props.clearChat}>C</button><button title="Delete current investigation" aria-label="Delete current investigation" className="delete-session" disabled={!activeThread || props.busy === "session"} onClick={props.deleteChat}>X</button></div>
-      <p className="sidebar-label">Saved Investigations</p>
+      <SidebarFact label="供应商" value={props.health?.llm.provider ?? "DeepSeek"} />
+      <SidebarFact label="模型" value={props.health?.llm.model ?? "deepseek-v4-flash"} />
+      <SidebarFact label="状态" value={props.health?.llm.configured ? "已配置" : "缺少 Key"} tone={props.health?.llm.configured ? "ok" : "warn"} />
+      <p className="sidebar-label">快速操作</p>
+      <button className="danger-action" disabled={props.busy === "scan"} onClick={props.runScan}>{props.busy === "scan" ? "扫描中" : "启动基线扫描"}</button>
+      <p className="sidebar-label">调查会话</p>
+      <div className="session-current"><span>{short(activeThread?.title || "未选择会话", 26)}</span><small>{activeThread ? `更新 ${activeThread.updated_at.slice(0, 10)}` : "创建或选择一个调查会话"}</small></div>
+      <div className="session-actions"><button title="新建调查" aria-label="新建调查" disabled={props.busy === "session"} onClick={props.createChat}>+</button><button title="重命名当前调查" aria-label="重命名当前调查" disabled={!activeThread || props.busy === "session"} onClick={props.renameChat}>R</button><button title="清空当前对话" aria-label="清空当前对话" disabled={!activeThread || props.busy === "session"} onClick={props.clearChat}>C</button><button title="删除当前调查" aria-label="删除当前调查" className="delete-session" disabled={!activeThread || props.busy === "session"} onClick={props.deleteChat}>X</button></div>
+      <p className="sidebar-label">已保存调查</p>
       <select className="report-select" onChange={(event) => event.target.value && props.loadChatThread(event.target.value)} value={props.activeThreadId}>
-        <option value="">Select investigation...</option>
+        <option value="">选择调查...</option>
         {props.chatThreads.map((thread) => <option key={thread.id} value={thread.id}>{short(thread.title || thread.id, 26)}</option>)}
       </select>
-      <p className="sidebar-label">Saved Reports</p>
-      <select className="report-select" onChange={(event) => event.target.value && props.openReport(event.target.value)} value=""><option value="">Select report...</option>{props.reports.map((report) => <option key={report.id} value={report.id}>{short(report.id, 22)}</option>)}</select>
-      <div className="sidebar-account"><div className="account-avatar">AK</div><div><strong>Alex Kim</strong><span>Security Team</span></div><b>⌄</b></div>
+      <p className="sidebar-label">已保存报告</p>
+      <select className="report-select" onChange={(event) => event.target.value && props.openReport(event.target.value)} value=""><option value="">选择报告...</option>{props.reports.map((report) => <option key={report.id} value={report.id}>{short(report.id, 22)}</option>)}</select>
+      <div className="sidebar-account"><div className="account-avatar">VA</div><div><strong>漏洞分析</strong><span>Security Workspace</span></div><b>⌄</b></div>
     </aside>
   );
 }
 
 function SidebarFact(props: { label: string; value: string; tone?: string }) { return <div className="sidebar-fact"><span>{props.label}</span><strong className={props.tone ? `tone-${props.tone}` : ""}>{props.value}</strong></div>; }
 
-function Topbar(props: { health: ApiHealth | null; activeReport: ReportDetail | null; refresh: () => void; openReport: (id: string) => void; busy: string; }) {
+function Topbar(props: { health: ApiHealth | null; activeReport: ReportDetail | null; refresh: () => void; openReport: (id: string) => void; closeIda: () => void; busy: string; }) {
   const reportId = props.activeReport?.report_id ?? "";
-  return <header className="topbar"><TopPathFact label="Active Sample" value={props.health?.ida.database ?? ""} empty="No IDB connected" action="Change" /><div className="top-statuses"><TopStatus label="IDA" value={props.health?.ida.connected ? "Connected" : "Offline"} tone={props.health?.ida.connected ? "ok" : "bad"} /><TopStatus label="Arch" value={`${props.health?.ida.architecture ?? "-"} / ${props.health?.ida.bits ?? "-"}-bit`} /><TopStatus label="LLM" value={props.health?.llm.configured ? `${props.health?.llm.provider ?? "Configured"}` : "Not configured"} tone={props.health?.llm.configured ? "ok" : "warn"} /></div><TopFact label="Report ID" value={reportId ? short(reportId, 20) : "-"} title={reportId || undefined} /><div className="top-actions"><button onClick={props.refresh}>Refresh</button><button onClick={() => reportId && props.openReport(reportId)} disabled={!reportId || props.busy === "report"}>Open Report</button></div></header>;
+  return <header className="topbar"><TopPathFact label="当前样本" value={props.health?.ida.database ?? ""} empty="未连接 IDB" action="切换" /><div className="top-statuses"><TopStatus label="IDA" value={props.health?.ida.connected ? "已连接" : "离线"} tone={props.health?.ida.connected ? "ok" : "bad"} /><TopStatus label="架构" value={`${props.health?.ida.architecture ?? "-"} / ${props.health?.ida.bits ?? "-"}-bit`} /><TopStatus label="模型" value={props.health?.llm.configured ? `${props.health?.llm.provider ?? "已配置"}` : "未配置"} tone={props.health?.llm.configured ? "ok" : "warn"} /></div><TopFact label="报告 ID" value={reportId ? short(reportId, 20) : "-"} title={reportId || undefined} /><div className="top-actions"><button onClick={props.refresh}>刷新</button><button onClick={() => reportId && props.openReport(reportId)} disabled={!reportId || props.busy === "report"}>打开报告</button><button className="danger-inline" onClick={props.closeIda} disabled={!props.health?.ida.connected || props.busy === "ida"}>{props.busy === "ida" ? "停止中" : "停止 IDA"}</button></div></header>;
 }
 
 function TopFact(props: { label: string; value: string; action?: string; tone?: string; title?: string }) { return <div className="top-fact" title={props.title ?? props.value}><span>{props.label}</span><strong className={props.tone ? `tone-${props.tone}` : ""}>{props.value}</strong>{props.action && <em>{props.action} &gt;</em>}</div>; }
@@ -443,7 +497,7 @@ function TopPathFact(props: { label: string; value: string; empty: string; actio
 function TopStatus(props: { label: string; value: string; tone?: string }) { return <div className="top-status"><span>{props.label}</span><strong className={props.tone ? `tone-${props.tone}` : ""}><i />{props.value}</strong></div>; }
 function Metric({ label, value, hint, tone = "neutral" }: { label: string; value: unknown; hint: string; tone?: string }) { return <div className={`metric ${tone}`}><span>{label}</span><strong>{String(value)}</strong><em>{hint}</em></div>; }
 
-function ChatPanel(props: { draftSeed: ChatDraftSeed; chatLog: ChatMessage[]; showDemo: boolean; showToolCalls: boolean; setShowToolCalls: (value: boolean) => void; busy: boolean; submitChat: (message: string) => void; clearChat: () => void; createChat: () => void; threadTitle: string; }) {
+function ChatPanel(props: { draftSeed: ChatDraftSeed; chatLog: ChatMessage[]; showDemo: boolean; showToolCalls: boolean; setShowToolCalls: (value: boolean) => void; busy: boolean; submitChat: (message: string) => void; cancelChat: () => void; clearChat: () => void; createChat: () => void; threadTitle: string; }) {
   const feedRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
 
@@ -472,18 +526,18 @@ function ChatPanel(props: { draftSeed: ChatDraftSeed; chatLog: ChatMessage[]; sh
 
   return (
     <section className="panel chat-panel">
-      <PanelHead title="Agent Chat" action="New Session" onAction={props.createChat} />
-      <div className="chat-session-bar"><span>Investigation</span><strong>{props.threadTitle}</strong><button onClick={props.clearChat}>Clear conversation</button></div>
-      <div className="chat-contextbar"><span className="context-pill live">DeepSeek</span><span>Read-only IDA tools</span><span>Harness trace enabled</span><span>Short-term memory</span></div>
+      <PanelHead title="Agent 对话" action="新建会话" onAction={props.createChat} />
+      <div className="chat-session-bar"><span>调查会话</span><strong>{props.threadTitle}</strong><button onClick={props.clearChat}>清空对话</button></div>
+      <div className="chat-contextbar"><span className="context-pill live">DeepSeek</span><span>只读 IDA 工具</span><span>执行轨迹已记录</span><span>上下文已保存</span></div>
       <div className="chat-feed" ref={feedRef}>
         {props.showDemo && props.chatLog.length === 0 && <><Message role="user" text="Analyze this firmware for memory corruption vulnerabilities." at="10:14:22" /><Message role="assistant" text="Understood. I will analyze the firmware with focused route, source, sink, and evidence collection." at="10:14:24" />{props.showToolCalls && <ToolCard title="Tool call: discover_entry_points" status="Completed" rows={["Discovered 23 potential entry points.", "0x00401800, 0x00401588, 0x00401A2C..."]} />}<Message role="assistant" text="Identifying sources and sinks across the binary..." at="10:14:26" />{props.showToolCalls && <ToolCard title="Tool call: analyze_data_flows" status="Completed" rows={["Sources 18   Sinks 27   Flows 64   High Risk 3"]} />}</>}
         {!props.showDemo && <ChatTranscript messages={props.chatLog} showToolCalls={props.showToolCalls} />}
         {props.busy && <AgentActivity messages={props.chatLog} />}
-        {!props.showDemo && props.chatLog.length === 0 && <div className="chat-empty"><strong>No active conversation</strong><span>Use a quick prompt or ask VulnAgent to inspect routes, sources, sinks, or a function address.</span></div>}
+        {!props.showDemo && props.chatLog.length === 0 && <div className="chat-empty"><strong>没有活动对话</strong><span>选择一个提示词，或让 VulnAgent 检查路由、输入源、危险调用和函数地址。</span></div>}
       </div>
       <div className="starter-row">{STARTER_PROMPTS.map((starter) => <button key={starter} disabled={props.busy} onClick={() => setDraft(starter)}>{short(starter, 42)}</button>)}</div>
-      <form className="composer" onSubmit={submit}><div className="composer-box"><textarea value={draft} disabled={props.busy} onKeyDown={submitOnEnter} onChange={(event) => setDraft(event.target.value)} placeholder="Ask about routes, sources, sinks, or a function address..." rows={2} /><div className="composer-meta"><span>/route /source /sink /trace /context press</span><span>Enter to send · Shift+Enter for newline</span></div></div><button aria-label="Send message" disabled={props.busy || !draft.trim()}>{props.busy ? "Running" : "Send"}</button></form>
-      <div className="chat-footer"><span>{props.busy ? "VulnAgent is processing the active request" : "Tool activity is persisted with this investigation"}</span><button type="button" className="switch-line" onClick={() => props.setShowToolCalls(!props.showToolCalls)}>Execution details <b className={props.showToolCalls ? "on" : ""} /></button></div>
+      <form className="composer" onSubmit={submit}><div className="composer-box"><textarea value={draft} disabled={props.busy} onKeyDown={submitOnEnter} onChange={(event) => setDraft(event.target.value)} placeholder="输入要分析的路由、source、sink 或函数地址..." rows={2} /><div className="composer-meta"><span>/route /source /sink /trace /context press</span><span>Enter 发送 · Shift+Enter 换行</span></div></div>{props.busy ? <button type="button" className="stop-run" aria-label="停止 Agent 运行" onClick={props.cancelChat}>停止</button> : <button aria-label="发送消息" disabled={!draft.trim()}>发送</button>}</form>
+      <div className="chat-footer"><span>{props.busy ? "VulnAgent 正在处理当前请求" : "本次调查会保存工具调用和证据记录"}</span><button type="button" className="switch-line" onClick={() => props.setShowToolCalls(!props.showToolCalls)}>执行细节 <b className={props.showToolCalls ? "on" : ""} /></button></div>
     </section>
   );
 }

@@ -209,7 +209,9 @@ def _serve(args: argparse.Namespace) -> None:
 
     backend = IdalibBackend(args.idb, writable=not args.read_only)
     app = create_app(backend)
-    uvicorn.run(app, host=args.host, port=args.port)
+    server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port))
+    app.state.shutdown_callback = lambda: setattr(server, "should_exit", True)
+    server.run()
 
 
 def _runs(args: argparse.Namespace) -> None:

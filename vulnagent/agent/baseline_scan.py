@@ -13,7 +13,7 @@ from vulnagent.agent.investigation_state import (
     InvestigationState,
     merge_report_into_investigation_state,
 )
-from vulnagent.agent.validation_planner import CandidateFinding, ValidationPlanner
+from vulnagent.agent.validation_planner import COMMAND_SINKS, CandidateFinding, ValidationPlanner
 from vulnagent.clients.async_ida_client import AsyncIdaClient
 from vulnagent.ida.schemas import ArgumentOriginResult, SinkCallResult, SourcePropagateResult
 from vulnagent.reports import (
@@ -27,11 +27,11 @@ from vulnagent.rules import get_default_sink_specs
 
 
 class BaselineScanConfig(BaseModel):
-    source_limit: int = Field(default=100, ge=1, le=10000)
-    source_min_score: float = Field(default=25.0, ge=0.0, le=100.0)
-    source_max_rounds: int = Field(default=5, ge=0, le=20)
-    sink_max_depth: int = Field(default=8, ge=0, le=64)
-    sink_max_functions: int = Field(default=500, ge=1, le=10000)
+    source_limit: int = Field(default=250, ge=1, le=10000)
+    source_min_score: float = Field(default=15.0, ge=0.0, le=100.0)
+    source_max_rounds: int = Field(default=8, ge=0, le=20)
+    sink_max_depth: int = Field(default=12, ge=0, le=64)
+    sink_max_functions: int = Field(default=1500, ge=1, le=10000)
     validation_max_candidates: int = Field(default=8, ge=1, le=50)
     max_findings: int = Field(default=100, ge=1, le=1000)
 
@@ -293,27 +293,18 @@ def _deduplicate(values: list[str]) -> list[str]:
 
 
 def _sink_category(sink_name: str) -> str:
-    command_sinks = {
-        "system",
-        "popen",
-        "exec",
-        "execl",
-        "execlp",
-        "execle",
-        "execv",
-        "execvp",
-        "execve",
-        "doSystem",
-    }
-    if sink_name in command_sinks:
+    if sink_name.lower() in COMMAND_SINKS:
         return "command-injection"
     return "memory-safety"
 
 
 def _candidate_priority(sink: SinkCallResult) -> tuple[int, float, int]:
     category = _sink_category(sink.sink_name)
+    caller = sink.caller_name.lower()
+    route_weight = 1 if any(hint in caller for hint in ("web", "cgi", "http", "route", "handler")) else 0
     return (
-        2 if category == "command-injection" else 1,
+        3 if category == "command-injection" else 2,
+        route_weight,
         float(sink.score),
         len(sink.args),
     )

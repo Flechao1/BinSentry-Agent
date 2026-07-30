@@ -403,3 +403,7 @@ class IdaClient:
     def close_database(self, save: bool = False) -> bool:
         payload = self._request_object("POST", "/database/close", {"save": save})
         return bool(payload.get("ok"))
+
+    def shutdown_backend(self, save: bool = False) -> bool:
+        payload = self._request_object("POST", "/shutdown", {"save": save})
+        return bool(payload.get("ok"))

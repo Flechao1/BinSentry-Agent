@@ -65,11 +65,11 @@ class AgentExecutionLimits:
     max_tool_calls_per_batch: int = 8
     max_decompile_calls: int = 20
     max_decompile_calls_per_batch: int = 4
-    max_scan_calls: int = 16
-    max_scan_calls_per_batch: int = 4
-    max_taint_trace_calls: int = 16
-    max_taint_trace_calls_per_batch: int = 4
-    max_turn_seconds: float = 300.0
+    max_scan_calls: int = 24
+    max_scan_calls_per_batch: int = 6
+    max_taint_trace_calls: int = 24
+    max_taint_trace_calls_per_batch: int = 6
+    max_turn_seconds: float = 600.0
     tool_timeout_seconds: float = 60.0
     model_timeout_seconds: float = 90.0
 
@@ -83,13 +83,13 @@ class AgentExecutionLimits:
             max_decompile_calls_per_batch=int(
                 os.getenv("VULN_AGENT_MAX_DECOMPILE_CALLS_PER_BATCH", "4")
             ),
-            max_scan_calls=int(os.getenv("VULN_AGENT_MAX_SCAN_CALLS", "16")),
-            max_scan_calls_per_batch=int(os.getenv("VULN_AGENT_MAX_SCAN_CALLS_PER_BATCH", "4")),
-            max_taint_trace_calls=int(os.getenv("VULN_AGENT_MAX_TAINT_TRACE_CALLS", "16")),
+            max_scan_calls=int(os.getenv("VULN_AGENT_MAX_SCAN_CALLS", "24")),
+            max_scan_calls_per_batch=int(os.getenv("VULN_AGENT_MAX_SCAN_CALLS_PER_BATCH", "6")),
+            max_taint_trace_calls=int(os.getenv("VULN_AGENT_MAX_TAINT_TRACE_CALLS", "24")),
             max_taint_trace_calls_per_batch=int(
-                os.getenv("VULN_AGENT_MAX_TAINT_TRACE_CALLS_PER_BATCH", "4")
+                os.getenv("VULN_AGENT_MAX_TAINT_TRACE_CALLS_PER_BATCH", "6")
             ),
-            max_turn_seconds=float(os.getenv("VULN_AGENT_MAX_TURN_SECONDS", "300")),
+            max_turn_seconds=float(os.getenv("VULN_AGENT_MAX_TURN_SECONDS", "600")),
             tool_timeout_seconds=float(os.getenv("VULN_AGENT_TOOL_TIMEOUT_SECONDS", "60")),
             model_timeout_seconds=float(os.getenv("VULN_AGENT_MODEL_TIMEOUT_SECONDS", "90")),
         )

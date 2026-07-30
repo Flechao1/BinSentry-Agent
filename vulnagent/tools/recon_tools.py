@@ -347,8 +347,8 @@ class IdaReconTools:
         roots: str = "",
         sources: str = "",
         max_candidates: int = 8,
-        max_depth: int = 8,
-        max_functions: int = 500,
+        max_depth: int = 12,
+        max_functions: int = 1500,
     ) -> str:
         """Scan sinks and validate the highest-priority candidates in one bounded pass.
 
@@ -365,9 +365,9 @@ class IdaReconTools:
                     "reason": "Use category all, command-injection, or memory-safety.",
                 }],
             )
-        max_candidates = max(1, min(int(max_candidates), 30))
+        max_candidates = max(1, min(int(max_candidates), 50))
         max_depth = max(0, min(int(max_depth), 32))
-        max_functions = max(1, min(int(max_functions), 2000))
+        max_functions = max(1, min(int(max_functions), 5000))
 
         specs = get_default_sink_specs()
         if category == "command-injection":
@@ -375,14 +375,16 @@ class IdaReconTools:
                 name: value for name, value in specs.items()
                 if name.lower() in {
                     "system", "popen", "exec", "execl", "execlp", "execle",
-                    "execv", "execvp", "execve", "dosystem",
+                    "execv", "execvp", "execve", "dosystem", "do_system",
+                    "eval", "fork_exec", "twsystem", "cstesystem",
                 }
             }
         elif category == "memory-safety":
             specs = {
                 name: value for name, value in specs.items()
                 if name.lower() in {
-                    "strcpy", "strcat", "sprintf", "vsprintf", "memcpy", "memmove",
+                    "strcpy", "strcat", "strncat", "sprintf", "vsprintf",
+                    "sscanf", "memcpy", "memmove", "gets",
                 }
             }
 
@@ -923,5 +925,3 @@ def format_function_context(context: FunctionContext) -> str:
         context.pseudocode or "(decompile unavailable)",
     ]
     return "\n".join(lines)
-
-

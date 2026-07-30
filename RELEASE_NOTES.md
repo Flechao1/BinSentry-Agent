@@ -1,5 +1,17 @@
 # VulnAgent-V2 Release Notes
 
+## v0.4.0 - Reports Package and IDA Backend Improvements
+
+### Highlights
+
+- Reconstructed the missing `vulnagent/reports` Python package with report models (`BinaryVulnerabilityReport`, `VulnerabilityFinding`, `CandidateFindingRecord`, `SampleInfo`), JSON artifact storage (`FileReportStore`), and FastAPI report router (`build_report_router`).
+- Resolved `ModuleNotFoundError: No module named 'vulnagent.reports'` that prevented the API server and IDA backend from starting.
+- Included `delink/` firmware decryption tool source for convenience.
+
+### Bug Fixes
+
+- Fixed import chain failure caused by the absent `vulnagent/reports` package referenced throughout the agent, harness, storage, and API layers.
+
 ## v0.2.0 - Agent Console and Harness Release
 
 This release upgrades VulnAgent from a primarily Streamlit-based prototype into a more complete Agent application with a React console, Harness runtime, persistent traces, and improved chat experience.

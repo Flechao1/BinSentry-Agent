@@ -82,6 +82,43 @@ class ValidationPlannerTests(unittest.TestCase):
         self.assertEqual(finding.status, "rejected")
         self.assertEqual(finding.confidence, 0.85)
 
+    def test_verifies_vendor_command_wrapper_case_insensitively(self) -> None:
+        client = FakeOriginClient(
+            {
+                1: ArgumentOriginResult(
+                    taint_status="tainted",
+                    source_func="getRequestParam",
+                    source_expr="param",
+                    reason="request parameter reaches wrapper",
+                )
+            }
+        )
+
+        finding = ValidationPlanner().validate(_sink("CsteSystem"), client)
+
+        self.assertEqual(finding.status, "verified")
+        self.assertEqual(finding.category, "command-injection")
+        self.assertEqual(finding.severity, "critical")
+
+    def test_promotes_remote_memory_candidate_from_nvram_or_request_helpers(self) -> None:
+        client = FakeOriginClient(
+            {
+                2: ArgumentOriginResult(
+                    taint_status="tainted",
+                    source_func="nvram_safe_get",
+                    source_expr="value",
+                    reason="configuration value is externally controlled",
+                )
+            }
+        )
+
+        finding = ValidationPlanner().validate(_sink("strncat", argument_index=2), client)
+
+        self.assertEqual(finding.status, "unverified")
+        self.assertEqual(finding.category, "memory-safety")
+        self.assertEqual(finding.severity, "high")
+        self.assertGreaterEqual(finding.confidence, 0.75)
+
 
 if __name__ == "__main__":
     unittest.main()

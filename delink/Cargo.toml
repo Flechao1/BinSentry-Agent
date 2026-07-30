@@ -1,0 +1,16 @@
+[package]
+name = "delink"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+env_logger = "0.11.5"
+hex = "0.4.3"
+log = "0.4.22"
+md5 = "0.7.0"
+sha256 = "1.5.0"
+thiserror = "2.0.0"
+sha1 = "0.10.6"
+hmac = "0.12.1"
+aes = "0.8.4"
+cbc = { version = "0.1.2", features = ["std"] }

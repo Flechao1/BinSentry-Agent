@@ -1318,14 +1318,15 @@ class IdalibBackend(IdaBackend):
         ida_funcs = self._ida["ida_funcs"]
         ida_hexrays = self._ida["ida_hexrays"]
 
-        source_set = set(_normalize_func_name(s) for s in sources)
+        source_set = {_normalize_lookup_key(s) for s in sources}
+        source_set.update(_normalize_lookup_key(source) for source in COMMON_TAINT_SOURCE_NAMES)
         new_sources: list[str] = []
 
         for round_num in range(max_rounds):
             round_new = 0
             for func_ea in idautils.Functions():
                 name = self._func_name(int(func_ea))
-                normed = _normalize_func_name(name)
+                normed = _normalize_lookup_key(name)
                 if normed in source_set or _is_source_blacklisted(name):
                     continue
 
@@ -1354,7 +1355,7 @@ class IdalibBackend(IdaBackend):
 
                 for call_expr in call_collector.calls:
                     callee_name = _resolve_callee_name(call_expr.x, self._ida["ida_name"])
-                    if not callee_name or _normalize_func_name(callee_name) not in source_set:
+                    if not callee_name or _normalize_lookup_key(callee_name) not in source_set:
                         continue
                     source_callee_count += 1
 
@@ -1956,6 +1957,37 @@ def _normalize_func_name(name: str) -> str:
     return name
 
 
+def _normalize_lookup_key(name: str) -> str:
+    return _normalize_func_name(name).lower()
+
+
+COMMON_TAINT_SOURCE_NAMES = {
+    "websGetVar",
+    "websGetVarString",
+    "websGetVarInt",
+    "websGetVarLong",
+    "cgiGetValue",
+    "cgiGetVariable",
+    "cgiGetVal",
+    "cgiFormString",
+    "cgiFormStringNoNewlines",
+    "cgiFormInteger",
+    "get_cgi",
+    "getCgi",
+    "getcgiparam",
+    "getenv",
+    "nvram_get",
+    "nvram_safe_get",
+    "acosNvramConfig_get",
+    "getQueryString",
+    "getRequestParam",
+    "getRequestHeader",
+    "recv",
+    "recvfrom",
+    "read",
+}
+
+
 class _TaintStatus(Enum):
     TAINTED = "tainted"
     CLEAN = "clean"
@@ -1992,7 +2024,10 @@ class _SinkCallVisitor:
         caller_name: str,
     ) -> None:
         self._ida = ida
-        self.sink_specs = sink_specs
+        self.sink_specs = {
+            _normalize_lookup_key(name): specs
+            for name, specs in sink_specs.items()
+        }
         self.caller_ea = caller_ea
         self.caller_name = caller_name
         self.results: list[dict] = []
@@ -2048,7 +2083,7 @@ class _SinkCallCtreeVisitor:
             return 0
         callee_name, callee_ea = callee
 
-        specs = self.sink_specs.get(callee_name)
+        specs = self.sink_specs.get(_normalize_lookup_key(callee_name))
         if not specs:
             return 0
 
@@ -2187,7 +2222,8 @@ class _TaintEngine:
 
     def __init__(self, ida: dict[str, Any], sources: set[str]) -> None:
         self._ida = ida
-        self._sources = sources
+        self._sources = {_normalize_lookup_key(source) for source in sources}
+        self._sources.update(_normalize_lookup_key(source) for source in COMMON_TAINT_SOURCE_NAMES)
         self._decompile_cache: dict[int, Any] = {}
 
     def _decompile_cached(self, func_ea: int) -> Any:
@@ -2209,7 +2245,7 @@ class _TaintEngine:
         return _normalize_func_name(name)
 
     def _is_source(self, func_name: str) -> bool:
-        return _normalize_func_name(func_name) in self._sources
+        return _normalize_lookup_key(func_name) in self._sources
 
     def _get_callers(self, func_ea: int) -> list[tuple[int, int]]:
         idautils = self._ida["idautils"]
@@ -2509,7 +2545,7 @@ class _TaintEngine:
         if callee.op == _idaapi.cot_obj:
             callee_name = _normalize_func_name(self._get_func_name(callee.obj_ea))
 
-            if callee_name in self._sources:
+            if self._is_source(callee_name):
                 return _TaintInfo(
                     _TaintStatus.TAINTED,
                     source_expr=self._safe_expr_text(expr_node),

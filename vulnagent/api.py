@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -50,10 +51,17 @@ from vulnagent.storage import SqliteVulnRepository
 load_dotenv()
 
 
+_ACTIVE_CHAT_TASKS: dict[str, asyncio.Task[Any]] = {}
+
+
 class AgentChatRequest(BaseModel):
     prompt: str
     thread_id: str = ""
     new_thread: bool = False
+
+
+class AgentCancelRequest(BaseModel):
+    thread_id: str = Field(..., min_length=1)
 
 
 class ChatCreateRequest(BaseModel):
@@ -228,6 +236,14 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
             raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
 
+    @app.post("/api/ida/shutdown")
+    def shutdown_ida_backend(request: CloseDatabaseRequest) -> dict[str, Any]:
+        client = _ida_client()
+        try:
+            return {"ok": client.shutdown_backend(save=request.save)}
+        except Exception as exc:  # noqa: BLE001 - show backend detail in frontend
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
     @app.get("/api/harness/runs")
     def list_harness_runs(limit: int = 20) -> list[dict[str, Any]]:
         return _repository().list_harness_runs(limit=limit)
@@ -301,21 +317,58 @@ def create_app() -> FastAPI:
         thread_id = request.thread_id
         if request.new_thread or not thread_id:
             thread_id = repository.create_chat_thread(title="Frontend investigation")
+        if _active_chat_task(thread_id) is not None:
+            raise HTTPException(status_code=409, detail="An agent request is already running for this thread")
         messages = repository.load_chat_messages(thread_id)
         if _is_context_press_command(request.prompt):
             return _compress_chat_context(repository, thread_id, messages, request.prompt)
-        result = await _harness(repository).run_agent_chat(
-            HarnessTurnRequest(
-                prompt=request.prompt,
-                thread_id=thread_id,
-                messages=messages,
-                ida_backend_url=_backend_url(),
-                report_dir=_report_dir(),
+        task = asyncio.create_task(
+            _harness(repository).run_agent_chat(
+                HarnessTurnRequest(
+                    prompt=request.prompt,
+                    thread_id=thread_id,
+                    messages=messages,
+                    ida_backend_url=_backend_url(),
+                    report_dir=_report_dir(),
+                )
             )
         )
-        payload = result.model_dump(mode="json", exclude={"messages", "report"})
-        payload["messages"] = _serialize_chat_messages(result.messages)
-        return payload
+        _ACTIVE_CHAT_TASKS[thread_id] = task
+        task.add_done_callback(
+            lambda completed, active_thread_id=thread_id: _forget_chat_task(active_thread_id, completed)
+        )
+        try:
+            result = await asyncio.shield(task)
+            payload = result.model_dump(mode="json", exclude={"messages", "report"})
+            payload["messages"] = _serialize_chat_messages(result.messages)
+            return payload
+        finally:
+            if task.done() and _ACTIVE_CHAT_TASKS.get(thread_id) is task:
+                _ACTIVE_CHAT_TASKS.pop(thread_id, None)
+
+    @app.post("/api/agent/chat/cancel")
+    async def cancel_agent_chat(request: AgentCancelRequest) -> dict[str, Any]:
+        task = _active_chat_task(request.thread_id)
+        if task is None:
+            return {"canceled": False, "detail": "No active agent request for this thread"}
+        task.cancel()
+        if _ACTIVE_CHAT_TASKS.get(request.thread_id) is task:
+            _ACTIVE_CHAT_TASKS.pop(request.thread_id, None)
+        try:
+            result = await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        except asyncio.TimeoutError:
+            return {"canceled": True, "detail": "Cancellation requested; the task is still unwinding"}
+        except asyncio.CancelledError:
+            return {"canceled": True, "detail": "Cancellation requested"}
+        finally:
+            if task.done() and _ACTIVE_CHAT_TASKS.get(request.thread_id) is task:
+                _ACTIVE_CHAT_TASKS.pop(request.thread_id, None)
+        return {
+            "canceled": result.status == "canceled",
+            "run_id": result.run_id,
+            "status": result.status,
+            "thread_id": result.thread_id,
+        }
 
     @app.post("/api/baseline/scan")
     async def baseline_scan(request: BaselineScanRequest) -> dict[str, Any]:
@@ -538,6 +591,19 @@ def _report_store() -> FileReportStore:
 
 def _harness(repository: SqliteVulnRepository) -> BinaryVulnAgentHarness:
     return BinaryVulnAgentHarness(repository=repository, timeout=_timeout())
+
+
+def _active_chat_task(thread_id: str) -> asyncio.Task[Any] | None:
+    task = _ACTIVE_CHAT_TASKS.get(thread_id)
+    if task is not None and task.done():
+        _ACTIVE_CHAT_TASKS.pop(thread_id, None)
+        return None
+    return task
+
+
+def _forget_chat_task(thread_id: str, task: asyncio.Task[Any]) -> None:
+    if _ACTIVE_CHAT_TASKS.get(thread_id) is task:
+        _ACTIVE_CHAT_TASKS.pop(thread_id, None)
 
 
 app = create_app()
