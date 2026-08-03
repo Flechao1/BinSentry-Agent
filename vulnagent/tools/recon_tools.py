@@ -40,6 +40,62 @@ def _dump_model(value: Any) -> dict[str, Any]:
     return {"value": str(value)}
 
 
+def _aggregate_sinks(
+    sinks: list[SinkCallResult],
+    *,
+    top_groups: int = 10,
+    per_group_limit: int = 2,
+    detail_limit: int = 20,
+) -> tuple[list[SinkCallResult], list[dict[str, Any]]]:
+    """Group sink calls by caller function and sink name.
+
+    Returns the representative call sites to detail and a compact aggregate
+    summary. Aggregation prevents a large scan (dozens of call sites across a
+    handful of callers) from flooding the model context while still exposing
+    every group and its volume.
+    """
+    groups: dict[tuple[str, str], list[SinkCallResult]] = {}
+    for sink in sinks:
+        key = (sink.caller_name or "unknown", sink.sink_name)
+        groups.setdefault(key, []).append(sink)
+
+    ordered = sorted(
+        groups.items(),
+        key=lambda item: (
+            max(sink.score for sink in item[1]),
+            len(item[1]),
+        ),
+        reverse=True,
+    )[:top_groups]
+
+    aggregates: list[dict[str, Any]] = []
+    shown: list[SinkCallResult] = []
+    for (caller, name), members in ordered:
+        locs = [sink.loc for sink in members]
+        aggregates.append({
+            "caller_name": caller,
+            "sink_name": name,
+            "count": len(members),
+            "category": members[0].category,
+            "locations": locs[:5],
+            "max_score": max(sink.score for sink in members),
+        })
+        shown.extend(members[:per_group_limit])
+    return shown[:detail_limit], aggregates
+
+
+def _dedupe_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in evidence:
+        key = str(item.get("reason", "")).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 class IdaReconTools:
     """Agent-facing wrappers around the IDA HTTP backend."""
 
@@ -300,17 +356,34 @@ class IdaReconTools:
             max_depth=max_depth,
             max_functions=max_functions,
         )
+        shown, aggregates = _aggregate_sinks(result.results)
         lines = [
             f"Sink scan scope: {result.scope}",
             f"Scanned functions: {result.scanned_functions}",
             f"Truncated: {result.truncated}",
             f"Sink calls: {len(result.results)}",
+            f"Aggregated sink groups: {len(aggregates)}",
         ]
-        for sink in result.results:
+        for aggregate in aggregates:
+            preview = ", ".join(aggregate["locations"][:3])
+            extra = f" (+{aggregate['count'] - 3} more)" if aggregate["count"] > 3 else ""
             lines.append(
-                f"  [{sink.category}] {sink.caller_name} @ {sink.caller_addr}: "
-                f"{sink.sink_name} @ {sink.loc} (score={sink.score})"
+                f"  [{aggregate['category']}] {aggregate['caller_name']}: "
+                f"{aggregate['count']} x {aggregate['sink_name']} @ {preview}{extra}"
             )
+        if shown:
+            lines.append(
+                f"Representative call sites ({len(shown)} shown; "
+                "remaining sites share the group summaries above):"
+            )
+            for sink in shown:
+                lines.append(
+                    f"  [{sink.category}] {sink.caller_name} @ {sink.caller_addr}: "
+                    f"{sink.sink_name} @ {sink.loc} (score={sink.score})"
+                )
+        else:
+            lines.append("No dangerous sink calls found in the scanned scope.")
+
         pending_sinks = [
             {
                 "sink_name": sink.sink_name,
@@ -320,25 +393,33 @@ class IdaReconTools:
                 "category": sink.category,
                 "reason": "Sink scan result requires source-to-sink validation.",
             }
-            for sink in result.results
+            for sink in shown
         ]
-        missing_evidence = [
+        missing_evidence = _dedupe_evidence([
             {
                 "reason": (
                     f"Validate whether user-controlled input reaches "
                     f"{sink.sink_name} @ {sink.loc}."
                 )
             }
-            for sink in result.results
-        ]
+            for sink in shown
+        ])
         return _json_result(
             "\n".join(lines),
             pending_sinks=pending_sinks,
             candidate_findings=[
                 self.validation_planner.plan(sink).model_dump(mode="json")
-                for sink in result.results
+                for sink in shown
             ],
             missing_evidence=missing_evidence,
+            sink_aggregates=aggregates,
+            function_notes=[{
+                "note": "Sink scan aggregated by caller function and sink name.",
+                "scope": result.scope,
+                "sink_calls": len(result.results),
+                "aggregate_groups": len(aggregates),
+                "detailed_candidates": len(shown),
+            }],
         )
 
     def investigate_vulnerability_candidates(
@@ -443,15 +524,19 @@ class IdaReconTools:
             f"Validated={len(candidates)}; verified={counts['verified']}; "
             f"unverified={counts['unverified']}; rejected={counts['rejected']}",
         ]
-        for candidate in candidates:
+        status_rank = {"verified": 0, "unverified": 1, "rejected": 2}
+        for candidate in sorted(
+            candidates,
+            key=lambda item: status_rank.get(item.status, 1),
+        ):
             lines.append(
                 f"[{candidate.status.upper()}] {candidate.category} "
                 f"{candidate.sink_name} @ {candidate.sink_ea} "
                 f"confidence={candidate.confidence:.2f}: {candidate.conclusion}"
             )
-            for evidence in candidate.evidence[:4]:
+            for evidence in candidate.evidence[:3]:
                 lines.append(f"  evidence: {evidence}")
-            for missing in candidate.missing_evidence[:3]:
+            for missing in candidate.missing_evidence[:2]:
                 lines.append(f"  next: {missing}")
 
         pending = [

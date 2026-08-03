@@ -90,7 +90,12 @@ class ContextBudget:
 
     @property
     def bounded_recent_message_tokens(self) -> int:
-        available = self.max_input_tokens - self.summary_tokens - self.state_tokens
+        available = (
+            self.max_input_tokens
+            - self.summary_tokens
+            - self.state_tokens
+            - self.response_reserve_tokens
+        )
         return max(256, min(self.recent_message_tokens, available))
 
     @classmethod
@@ -304,7 +309,9 @@ class ContextBuilder:
         state_text = json.dumps(state.prompt_dump(), ensure_ascii=False, indent=2)
         return (
             "\n\nShort-term memory policy:\n"
-            "- Treat the structured investigation state as the current task status.\n"
+            "- The user's latest instruction is the task for this turn. The sections\n"
+            "  below are accumulated evidence and background, not a task to continue.\n"
+            "- Use the structured investigation state as the current evidence status.\n"
             "- Use the older-conversation summary as background only.\n"
             "- Recent messages remain the most precise source for conversational details.\n"
             "- IDA tool output remains the source of truth for vulnerability evidence.\n\n"
@@ -364,6 +371,64 @@ def _split_turns(messages: list[BaseMessage]) -> list[list[BaseMessage]]:
     return turns
 
 
+def _split_tool_segments(messages: list[BaseMessage]) -> list[list[BaseMessage]]:
+    """Group messages into whole tool batches.
+
+    An AIMessage with tool_calls plus the ToolMessages that follow it form one
+    segment. Providers reject an orphan ToolMessage whose requesting AIMessage is
+    missing, so trimming must keep or drop segments atomically.
+    """
+    segments: list[list[BaseMessage]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if isinstance(message, AIMessage) and message.tool_calls:
+            end = index + 1
+            while end < len(messages) and isinstance(messages[end], ToolMessage):
+                end += 1
+            segments.append(messages[index:end])
+            index = end
+        else:
+            segments.append([message])
+            index += 1
+    return segments
+
+
+def _segment_tokens(segment: list[BaseMessage]) -> int:
+    return sum(_estimate_tokens(_message_text(message)) for message in segment)
+
+
+def trim_messages_for_model(
+    messages: list[BaseMessage],
+    *,
+    max_tokens: int,
+    max_message_tokens: int,
+) -> list[BaseMessage]:
+    """Bound a conversation for one model call while preserving coherence.
+
+    Walks messages from the most recent backward, keeping whole tool batches so
+    no orphan ToolMessage reaches the provider. Always keeps the first message as
+    the task anchor. Messages larger than ``max_message_tokens`` are clipped.
+    """
+    if max_tokens <= 0:
+        return messages
+    segments = _split_tool_segments(messages)
+    if not segments:
+        return messages
+    max_message_chars = max_message_tokens * CHARS_PER_TOKEN
+    kept: list[list[BaseMessage]] = [segments[0]]
+    used = _segment_tokens(segments[0])
+    for segment in reversed(segments[1:]):
+        clipped = [_clip_message(message, max_message_chars) for message in segment]
+        size = sum(_estimate_tokens(_message_text(message)) for message in clipped)
+        if used + size > max_tokens:
+            break
+        kept.append(clipped)
+        used += size
+    order = [kept[0], *reversed(kept[1:])]
+    return [message for segment in order for message in segment]
+
+
 def _fit_recent_messages(
     messages: list[BaseMessage],
     *,
@@ -376,10 +441,51 @@ def _fit_recent_messages(
         clipped_turn = [_clip_message(message, max_message_chars) for message in turn]
         turn_chars = sum(len(_message_text(message)) for message in clipped_turn)
         if selected_turns and used_chars + turn_chars > max_chars:
+            tail = _turn_tail(
+                turn,
+                remaining=max_chars - used_chars,
+                max_message_chars=max_message_chars,
+            )
+            if tail:
+                selected_turns.append(tail)
             break
         selected_turns.append(clipped_turn)
         used_chars += turn_chars
     return [message for turn in reversed(selected_turns) for message in turn]
+
+
+def _turn_tail(
+    turn: list[BaseMessage],
+    *,
+    remaining: int,
+    max_message_chars: int,
+) -> list[BaseMessage]:
+    """Keep the end of an over-sized turn so cross-turn continuity survives.
+
+    A heavy mining turn is dropped by the recent-message fitter when the newest
+    turn (often a short "继续"/"continue") already consumes the budget. Without
+    this, the previous turn's final assistant message — usually the budget-stop
+    continuation plan — never reaches the model, and the next turn restarts
+    discovery instead of resuming. Tool results and pending tool calls are skipped:
+    their evidence lives in the structured state, and a partial batch would orphan
+    messages.
+    """
+    tail: list[BaseMessage] = []
+    used = 0
+    for message in reversed(turn):
+        if isinstance(message, ToolMessage):
+            continue
+        if isinstance(message, AIMessage) and message.tool_calls:
+            continue
+        clipped = _clip_message(message, max_message_chars)
+        size = len(_message_text(clipped))
+        if tail and used + size > remaining:
+            break
+        tail.append(clipped)
+        used += size
+        if len(tail) >= 4:
+            break
+    return list(reversed(tail))
 
 
 def _clip_message(message: BaseMessage, max_chars: int) -> BaseMessage:
@@ -624,9 +730,20 @@ def _apply_structured_tool_result(
                     f"{state_candidate.caller_name} -> {state_candidate.sink_name} "
                     f"{state_candidate.sink_ea}".strip()
                 )
+            elif state_candidate.status == "rejected":
+                state.resolve_sink(state_candidate.sink_ea, state_candidate.caller_ea)
+                state.add_ruled_out_path(_ruled_out_text(state_candidate.model_dump()))
 
     for finding in _as_list(payload.get("verified_findings")):
         state.add_verified_finding(_finding_text(finding))
+
+    for exclusion in _as_list(payload.get("ruled_out", payload.get("ruled_out_paths"))):
+        if isinstance(exclusion, dict):
+            state.resolve_sink(
+                str(exclusion.get("sink_ea") or exclusion.get("ea") or ""),
+                str(exclusion.get("caller_ea") or ""),
+            )
+        state.add_ruled_out_path(_ruled_out_text(exclusion))
 
     for note in _as_list(payload.get("function_notes")):
         state.add_function_note(_function_note_text(note))
@@ -671,6 +788,8 @@ def _parse_tool_json(result: str) -> dict[str, Any] | None:
             "verified_findings",
             "candidate_findings",
             "indirect_call_sites",
+            "ruled_out",
+            "ruled_out_paths",
         }
     ):
         return None
@@ -707,6 +826,21 @@ def _function_note_text(value: Any) -> str:
         note = value.get("note") or value.get("reason") or value.get("summary") or value
         prefix = " ".join(str(item) for item in [name, ea] if item)
         return f"{prefix}: {note}" if prefix else str(note)
+    return str(value)
+
+
+def _ruled_out_text(value: Any) -> str:
+    if isinstance(value, dict):
+        path = value.get("path") or value.get("ruled_out") or ""
+        reason = value.get("reason") or value.get("conclusion") or ""
+        sink = value.get("sink_ea") or value.get("ea") or ""
+        caller = value.get("caller_name") or value.get("caller_ea") or ""
+        parts = " -> ".join(
+            part for part in (str(caller), str(path), str(sink)) if part
+        )
+        if reason:
+            return f"{parts}: {reason}" if parts else str(reason)
+        return parts or str(value)
     return str(value)
 
 

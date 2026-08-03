@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -11,7 +13,18 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from vulnagent.agent.context_builder import ContextBuilder, sanitize_provider_message_order
 from vulnagent.agent.langgraph_agent import build_binary_vulnerability_agent
 from vulnagent.agent.llm import LlmSettings, build_chat_model, get_active_llm_settings
+from vulnagent.skills import load_skill, resolve_skill_name
 from vulnagent.storage import SqliteVulnRepository
+
+
+_SKILL_COMMAND_RE = re.compile(r"^\s*/skill\s+(?P<name>[\w.-]+)(?P<prompt>[\s\S]*)$", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class SkillDirective:
+    name: str = ""
+    prompt: str = ""
+    context_note: str = ""
 
 
 class StandaloneBinaryVulnerabilityAgent:
@@ -62,13 +75,15 @@ class StandaloneBinaryVulnerabilityAgent:
         thread_id: str = "",
     ) -> list[BaseMessage]:
         """Append a user prompt, execute the tool loop, and return the updated history."""
-        history = [*sanitize_provider_message_order(messages or []), HumanMessage(content=prompt)]
+        skill = _extract_skill_directive(prompt)
+        user_prompt = skill.prompt or prompt
+        history = [*sanitize_provider_message_order(messages or []), HumanMessage(content=user_prompt)]
         context_messages = history
-        context_note = ""
+        context_note = skill.context_note
         if thread_id and self.context_builder:
             prepared = self.context_builder.prepare(thread_id, history)
             context_messages = prepared.messages
-            context_note = prepared.context_note
+            context_note = prepared.context_note + context_note
         result = await self.graph.ainvoke(
             {"messages": context_messages, "context_note": context_note},
             config={"configurable": {"thread_id": thread_id}},
@@ -84,3 +99,29 @@ class StandaloneBinaryVulnerabilityAgent:
 
 def _env_bool(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _extract_skill_directive(prompt: str) -> SkillDirective:
+    match = _SKILL_COMMAND_RE.match(prompt)
+    if match is None:
+        return SkillDirective(prompt=prompt)
+
+    raw_name = match.group("name").strip().lower()
+    skill_name = resolve_skill_name(raw_name)
+    remaining_prompt = match.group("prompt").strip()
+    if not remaining_prompt:
+        remaining_prompt = (
+            f"Use the `{skill_name}` skill for this turn. Summarize the next inputs "
+            "or analysis target needed before continuing."
+        )
+
+    skill_text = load_skill(skill_name)
+    return SkillDirective(
+        name=skill_name,
+        prompt=remaining_prompt,
+        context_note=(
+            "\n\nExplicitly loaded skill for this turn. Follow it when it applies:\n"
+            f"Skill name: {skill_name}\n"
+            f"{skill_text}\n"
+        ),
+    )

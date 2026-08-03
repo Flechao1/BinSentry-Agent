@@ -8,6 +8,7 @@ MAX_ROUTES = 50
 MAX_SOURCES = 30
 MAX_SINKS = 30
 MAX_FINDINGS = 30
+MAX_RULED_OUT = 30
 MAX_CANDIDATES = 50
 MAX_QUESTIONS = 30
 MAX_FUNCTIONS = 80
@@ -60,6 +61,7 @@ class InvestigationState(BaseModel):
     indirect_call_sites: list[str] = Field(default_factory=list)
     missing_evidence: list[str] = Field(default_factory=list)
     verified_findings: list[str] = Field(default_factory=list)
+    ruled_out_paths: list[str] = Field(default_factory=list)
     active_function: str = ""
     active_sink: dict[str, Any] = Field(default_factory=dict)
     investigated_functions: list[str] = Field(default_factory=list)
@@ -118,6 +120,9 @@ class InvestigationState(BaseModel):
     def add_verified_finding(self, finding: str) -> None:
         _append_unique(self.verified_findings, finding, MAX_FINDINGS)
 
+    def add_ruled_out_path(self, path: str) -> None:
+        _append_unique(self.ruled_out_paths, path, MAX_RULED_OUT)
+
     def add_function_note(self, note: str) -> None:
         _append_unique(self.function_notes, note, MAX_FUNCTION_NOTES)
 
@@ -164,6 +169,7 @@ class InvestigationState(BaseModel):
         )
         self.missing_evidence = _bounded_unique(self.missing_evidence, MAX_QUESTIONS)
         self.verified_findings = _bounded_unique(self.verified_findings, MAX_FINDINGS)
+        self.ruled_out_paths = _bounded_unique(self.ruled_out_paths, MAX_RULED_OUT)
         self.active_function = _clip(self.active_function)
         self.active_sink = {
             _clip(str(key)): _clip_value(value)

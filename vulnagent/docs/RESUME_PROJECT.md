@@ -208,11 +208,14 @@ vulnagent/agent/execution_limits.py
 最大工具调用次数：48
 最大工具循环轮数：24
 最大反编译次数：20
-最大扫描和污点分析次数：8
-单轮最长执行时间：300 秒
-单工具最长执行时间：60 秒
-单次模型调用最长时间：90 秒
+最大扫描次数：24
+最大污点追踪次数：24
+单轮最长执行时间：900 秒
+单工具最长执行时间：90 秒
+单次模型调用最长时间：180 秒（超时后自动重试一次，仍超时才终止）
 ```
+
+所有数值均可用环境变量覆盖，例如 `VULN_AGENT_MAX_TURN_SECONDS`、`VULN_AGENT_MODEL_TIMEOUT_SECONDS`、`VULN_AGENT_TOOL_TIMEOUT_SECONDS`。
 
 额外保护：
 

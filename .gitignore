@@ -1,6 +1,7 @@
 data/
 reports/
 dataset/
+FirmVulnFlow/
 .env
 *.env
 .vscode/

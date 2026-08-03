@@ -69,9 +69,9 @@ class AgentExecutionLimits:
     max_scan_calls_per_batch: int = 6
     max_taint_trace_calls: int = 24
     max_taint_trace_calls_per_batch: int = 6
-    max_turn_seconds: float = 600.0
-    tool_timeout_seconds: float = 60.0
-    model_timeout_seconds: float = 90.0
+    max_turn_seconds: float = 900.0
+    tool_timeout_seconds: float = 90.0
+    model_timeout_seconds: float = 180.0
 
     @classmethod
     def from_env(cls) -> AgentExecutionLimits:
@@ -89,9 +89,9 @@ class AgentExecutionLimits:
             max_taint_trace_calls_per_batch=int(
                 os.getenv("VULN_AGENT_MAX_TAINT_TRACE_CALLS_PER_BATCH", "6")
             ),
-            max_turn_seconds=float(os.getenv("VULN_AGENT_MAX_TURN_SECONDS", "600")),
-            tool_timeout_seconds=float(os.getenv("VULN_AGENT_TOOL_TIMEOUT_SECONDS", "60")),
-            model_timeout_seconds=float(os.getenv("VULN_AGENT_MODEL_TIMEOUT_SECONDS", "90")),
+            max_turn_seconds=float(os.getenv("VULN_AGENT_MAX_TURN_SECONDS", "900")),
+            tool_timeout_seconds=float(os.getenv("VULN_AGENT_TOOL_TIMEOUT_SECONDS", "90")),
+            model_timeout_seconds=float(os.getenv("VULN_AGENT_MODEL_TIMEOUT_SECONDS", "180")),
         )
 
     def remaining_seconds(self, started_at: float) -> float:
@@ -233,12 +233,34 @@ class AgentExecutionLimits:
         return "", decision.updates
 
 
-def budget_stop_message(reason: str) -> str:
-    return (
+def budget_stop_message(reason: str, continuation: str = "") -> str:
+    base = (
         "This investigation turn stopped because its execution budget was reached. "
-        f"{reason} Review the completed tool results, then request a focused follow-up "
+        f"{reason}"
+    )
+    if continuation:
+        return (
+            f"{base}\n\n{continuation}\n\n"
+            "Send a focused follow-up instruction such as \"continue validating the "
+            "pending candidates\" to resume from this state."
+        )
+    return (
+        base
+        + " Review the completed tool results, then request a focused follow-up "
         "turn if more analysis is needed."
     )
+
+
+def model_timeout_message(continuation: str = "") -> str:
+    """Distinguish a transient model stall from a genuine budget condition."""
+    base = (
+        "The model call timed out before responding. This is a transient model stall, "
+        "not a budget limit: retry the same instruction to continue the investigation "
+        "with the budget left in this turn."
+    )
+    if continuation:
+        return f"{base}\n\n{continuation}"
+    return base
 
 
 def _tool_signature(tool_call: dict[str, Any]) -> str:

@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from vulnagent.clients.ida_client import IdaClient
 from vulnagent.tools.firmware_tools import FirmwareFilesystemTools
 from vulnagent.tools.intel_tools import VulnerabilityIntelTools
 from vulnagent.tools.recon_tools import IdaReconTools
+
+
+def _record_investigation_exclusion(path: str, reason: str, sink_ea: str = "") -> str:
+    """Return a structured ruled-out payload for investigation state persistence."""
+    return json.dumps(
+        {
+            "ruled_out": [
+                {"path": path, "reason": reason, "sink_ea": sink_ea.strip() or None}
+            ]
+        },
+        ensure_ascii=False,
+    )
 
 
 def build_readonly_ida_tools(client: IdaClient) -> list[Any]:
@@ -174,6 +187,19 @@ def build_readonly_ida_tools(client: IdaClient) -> list[Any]:
             description=(
                 "Trace one argument at a known callsite toward its origin. Prefer this "
                 "focused tool when the caller, callsite, and callee are already known."
+            ),
+        ),
+        StructuredTool.from_function(
+            _record_investigation_exclusion,
+            name="record_investigation_exclusion",
+            description=(
+                "Record a candidate as a confirmed false positive so later turns never "
+                "re-report or re-validate it. Call this only after you have deterministic "
+                "evidence (for example, a decompiled guard such as tbsCheckHostIpEx that "
+                "strictly validates the input format and rejects the payload) or when the "
+                "user explicitly reports the candidate is a false positive. Provide the "
+                "exact chain (source -> sink with addresses) and the reason, plus the "
+                "sink_ea when known. Read-only bookkeeping; does not modify the binary."
             ),
         ),
     ]
