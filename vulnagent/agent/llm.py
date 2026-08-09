@@ -101,7 +101,7 @@ def get_llm_status() -> dict[str, str | bool]:
     }
 
 
-def build_chat_model(settings: LlmSettings | None = None):
+def build_chat_model(settings: LlmSettings | None = None, *, streaming: bool = False):
     """Build a LangChain chat model for DeepSeek or another OpenAI-compatible API."""
     from langchain_openai import ChatOpenAI
 
@@ -112,5 +112,5 @@ def build_chat_model(settings: LlmSettings | None = None):
         base_url=resolved.base_url,
         temperature=resolved.temperature,
         max_tokens=resolved.max_tokens,
-        streaming=False,
+        streaming=streaming,
     )

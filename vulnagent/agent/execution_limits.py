@@ -34,8 +34,6 @@ TAINT_TRACE_TOOLS = {
     "trace_argument_origin",
     "validate_sink_candidate",
 }
-SCAN_TOOLS = DISCOVERY_SCAN_TOOLS | FOCUSED_ANALYSIS_TOOLS | TAINT_TRACE_TOOLS
-HEAVY_TOOLS = DECOMPILE_TOOLS | DISCOVERY_SCAN_TOOLS | TAINT_TRACE_TOOLS
 
 
 @dataclass(frozen=True)
@@ -202,35 +200,6 @@ class AgentExecutionLimits:
             },
         )
 
-
-    def authorize(
-        self,
-        tool_calls: list[dict[str, Any]],
-        *,
-        started_at: float,
-        tool_call_count: int,
-        tool_loop_count: int,
-        decompile_count: int,
-        scan_count: int,
-        tool_signatures: list[str],
-        taint_trace_count: int = 0,
-        tool_failure_counts: dict[str, int] | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        """Compatibility wrapper. Prefer schedule()."""
-        decision = self.schedule(
-            tool_calls,
-            started_at=started_at,
-            tool_call_count=tool_call_count,
-            tool_loop_count=tool_loop_count,
-            decompile_count=decompile_count,
-            scan_count=scan_count,
-            taint_trace_count=taint_trace_count,
-            tool_signatures=tool_signatures,
-            tool_failure_counts=tool_failure_counts,
-        )
-        if decision.skipped_calls and not decision.allowed_calls:
-            return decision.skipped_calls[0].reason, {}
-        return "", decision.updates
 
 
 def budget_stop_message(reason: str, continuation: str = "") -> str:

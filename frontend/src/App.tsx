@@ -162,6 +162,8 @@ export function App() {
     const controller = new AbortController();
     chatAbortRef.current = controller;
     cancelingChatRef.current = false;
+    // streaming assistant placeholder
+    const streamId = `stream-${Date.now()}`;
     try {
       let activeThreadId = threadId;
       if (!activeThreadId) {
@@ -170,15 +172,61 @@ export function App() {
         setThreadId(thread.id);
       }
       activeChatThreadRef.current = activeThreadId;
-      const result: AgentChatResponse = await api.chat(submitted, activeThreadId, controller.signal);
-      setThreadId(result.thread_id);
-      setChatLog(result.messages?.length ? result.messages : [pendingMessage, { id: result.run_id, role: "assistant", content: result.status === "completed" ? result.answer : result.error }]);
+
+      // Insert empty streaming placeholder
+      setChatLog((items) => [...items, { id: streamId, role: "assistant", content: "" } as ChatMessage]);
+
+      const toolLines: ChatMessage[] = [];
+      let textAccum = "";
+
+      for await (const event of api.chatStream(submitted, activeThreadId, controller.signal)) {
+        if (event.type === "tool_start") {
+          const toolMsg: ChatMessage = {
+            id: `tool-start-${Date.now()}-${Math.random()}`,
+            role: "tool",
+            name: event.name,
+            content: `调用 ${event.name}${event.input ? `(${event.input})` : ""}`,
+            status: "running",
+          } as ChatMessage;
+          toolLines.push(toolMsg);
+          setChatLog((items) => {
+            const withoutStream = items.filter((m) => m.id !== streamId);
+            return [...withoutStream, ...toolLines, { id: streamId, role: "assistant", content: textAccum } as ChatMessage];
+          });
+        } else if (event.type === "tool_end") {
+          for (let i = toolLines.length - 1; i >= 0; i--) {
+            if (toolLines[i].name === event.name && toolLines[i].status === "running") {
+              toolLines[i] = { ...toolLines[i], status: "done", content: `${event.name}: ${event.summary ?? ""}` };
+              break;
+            }
+          }
+          setChatLog((items) => {
+            const withoutStream = items.filter((m) => m.id !== streamId);
+            return [...withoutStream, ...toolLines, { id: streamId, role: "assistant", content: textAccum } as ChatMessage];
+          });
+        } else if (event.type === "text_token") {
+          textAccum += event.content ?? "";
+          setChatLog((items) =>
+            items.map((m) => m.id === streamId ? { ...m, content: textAccum } : m)
+          );
+        } else if (event.type === "done") {
+          textAccum = event.content ?? textAccum;
+          // Replace placeholder with final message
+          setChatLog((items) =>
+            items.map((m) => m.id === streamId ? { ...m, content: textAccum } : m)
+          );
+        } else if (event.type === "error") {
+          setError(event.content ?? "Agent error");
+        }
+      }
+
       await refresh();
-      setActiveRun(await api.run(result.run_id));
+      try { setActiveRun(await api.run((await api.runs())[0]?.id ?? "")); } catch { /* ignore */ }
     } catch (exc) {
       if (!cancelingChatRef.current) {
         setError(String(exc));
         seedChatDraft(submitted);
+        setChatLog((items) => items.filter((m) => m.id !== streamId));
       }
     } finally {
       if (chatAbortRef.current === controller) chatAbortRef.current = null;

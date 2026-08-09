@@ -43,6 +43,8 @@ _DSML_TOOL_BLOCK_RE = re.compile(
     r"<[^>]*DSML[^>]*tool_calls[^>]*>(?P<body>.*?)</[^>]*DSML[^>]*tool_calls[^>]*>",
     re.IGNORECASE | re.DOTALL,
 )
+# Matches just the opening tag — used for streaming early-exit before the full block arrives.
+_DSML_OPEN_TAG_RE = re.compile(r"<[^>]*DSML", re.IGNORECASE)
 _DSML_INVOKE_RE = re.compile(
     r"<[^>]*DSML[^>]*invoke\s+name=[\"'](?P<name>[^\"']+)[\"'][^>]*>"
     r"(?P<body>.*?)</[^>]*DSML[^>]*invoke[^>]*>",

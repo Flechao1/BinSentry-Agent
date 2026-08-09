@@ -239,23 +239,6 @@ class IdaReconTools:
             f"Function name is ambiguous or unknown: {text}. Use list_binary_functions first."
         )
 
-    def rename_function(self, ea: int | str, new_name: str, reason: str = "") -> str:
-        result = self.client.rename_function(ea, new_name, reason)
-        status = "OK" if result.ok else "FAILED"
-        return (
-            f"[{status}] rename {result.ea}: "
-            f"{result.old_name} -> {result.new_name}. {result.message}".strip()
-        )
-
-    def save_database(self, output_path: str = "") -> str:
-        result = self.client.save_database(output_path)
-        status = "OK" if result.ok else "FAILED"
-        return f"[{status}] save database: {result.path} {result.message}".strip()
-
-    def close_database(self, save: bool = False) -> str:
-        ok = self.client.close_database(save=save)
-        return "[OK] close database" if ok else "[FAILED] close database"
-
     # ------------------------------------------------------------------
     # Taint Analysis Tools
     # ------------------------------------------------------------------

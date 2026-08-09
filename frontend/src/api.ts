@@ -111,6 +111,40 @@ export const api = {
         body: JSON.stringify({ prompt, thread_id: threadId, new_thread: !threadId })
       }
     ),
+  /** SSE streaming chat. Returns an EventSource-like async generator over parsed event objects. */
+  chatStream: async function* (
+    prompt: string,
+    threadId = "",
+    signal?: AbortSignal
+  ): AsyncGenerator<{ type: string; name?: string; input?: string; summary?: string; content?: string }> {
+    const response = await fetch(`${API_BASE}/api/agent/chat/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, thread_id: threadId, new_thread: !threadId }),
+      signal,
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`${response.status} ${response.statusText}: ${detail}`);
+    }
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data:")) continue;
+        try {
+          yield JSON.parse(line.slice(5).trim());
+        } catch { /* skip malformed line */ }
+      }
+    }
+  },
   scan: (threadId = "") =>
     request<{ run_id: string; status: string; thread_id: string; report_id: string; answer: string; error: string }>(
       "/api/baseline/scan",

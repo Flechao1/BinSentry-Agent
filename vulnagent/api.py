@@ -9,13 +9,16 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from vulnagent.agent.baseline_scan import BaselineScanConfig
 from vulnagent.agent.context_builder import ContextBuilder
+from vulnagent.agent.langgraph_agent import _message_content_text
+from vulnagent.agent.standalone import StandaloneBinaryVulnerabilityAgent
 from vulnagent.agent.llm import (
     LlmSettings,
     build_chat_model,
@@ -370,6 +373,76 @@ def create_app() -> FastAPI:
             "thread_id": result.thread_id,
         }
 
+    @app.post("/api/agent/chat/stream")
+    async def agent_chat_stream(request: AgentChatRequest) -> StreamingResponse:
+        """SSE stream: yields tool_start / tool_end / done / error events."""
+        repository = _repository()
+        thread_id = request.thread_id
+        if request.new_thread or not thread_id:
+            thread_id = repository.create_chat_thread(title="Frontend investigation")
+        if _active_chat_task(thread_id) is not None:
+            raise HTTPException(status_code=409, detail="An agent request is already running for this thread")
+        messages = repository.load_chat_messages(thread_id)
+
+        runtime = _get_chat_runtime()
+        # Keep repository in sync in case it was recreated
+        if runtime.repository is None:
+            runtime.repository = repository
+        if runtime.context_builder is None:
+            from vulnagent.agent.context_builder import ContextBuilder
+            from vulnagent.agent.llm import build_chat_model
+            runtime.context_builder = ContextBuilder(
+                repository,
+                summary_llm_factory=lambda: build_chat_model(runtime.llm_settings),
+            )
+
+        import json as _json
+
+        async def event_generator():
+            # Send a keepalive comment every 15 s so browsers don't time out
+            # during long tool-call sequences that produce no output.
+            keepalive_task: asyncio.Task | None = None
+
+            async def keepalive(writer_queue: asyncio.Queue):
+                while True:
+                    await asyncio.sleep(15)
+                    await writer_queue.put(": ping\n\n")
+
+            queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+            async def produce():
+                try:
+                    async for chunk in runtime.ask_stream(
+                        request.prompt, messages, thread_id=thread_id
+                    ):
+                        await queue.put(chunk)
+                except Exception as exc:  # noqa: BLE001
+                    await queue.put(f"data: {_json.dumps({'type': 'error', 'content': str(exc)}, ensure_ascii=False)}\n\n")
+                finally:
+                    await queue.put(None)  # sentinel
+
+            producer = asyncio.create_task(produce())
+            keepalive_task = asyncio.create_task(keepalive(queue))
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    yield item
+            finally:
+                keepalive_task.cancel()
+                producer.cancel()
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-Thread-Id": thread_id,
+            },
+        )
+
     @app.post("/api/baseline/scan")
     async def baseline_scan(request: BaselineScanRequest) -> dict[str, Any]:
         repository = _repository()
@@ -537,6 +610,21 @@ def _repository() -> SqliteVulnRepository:
 
 def _backend_url() -> str:
     return os.getenv("IDA_BACKEND_URL", "http://127.0.0.1:8765")
+
+
+_chat_runtime: StandaloneBinaryVulnerabilityAgent | None = None
+
+
+def _get_chat_runtime() -> StandaloneBinaryVulnerabilityAgent:
+    """Return a process-scoped agent instance so the stream graph is built only once."""
+    global _chat_runtime
+    if _chat_runtime is None:
+        _chat_runtime = StandaloneBinaryVulnerabilityAgent(
+            ida_backend_url=_backend_url(),
+            report_dir=_report_dir(),
+            repository=_repository(),
+        )
+    return _chat_runtime
 
 
 def _report_dir() -> str:
@@ -735,16 +823,3 @@ def _serialize_chat_messages(messages: list[BaseMessage]) -> list[dict[str, Any]
         serialized.append(item)
     return serialized
 
-
-def _message_content_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                parts.append(str(item.get("text") or item.get("content") or item))
-            else:
-                parts.append(str(item))
-        return "\n".join(parts)
-    return str(content)

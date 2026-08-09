@@ -2210,7 +2210,6 @@ class _SinkCallCtreeVisitor:
                 for idx in range(max(1, start), min(end, argcount) + 1):
                     indices.add(idx)
         return sorted(indices)
-# PLACEHOLDER_TAINT_ENGINE_CLASS
 
 
 class _TaintEngine:

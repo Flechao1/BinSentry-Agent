@@ -44,10 +44,7 @@ def normalize_ea(ea: int | str) -> str:
     value = str(ea).strip().lower()
     if not value:
         raise ValueError("address is required")
-    if value.startswith("0x"):
-        number = int(value, 16)
-    else:
-        number = int(value, 16)
+    number = int(value, 16)
     if number < 0:
         raise ValueError("address must be non-negative")
     return hex(number)
