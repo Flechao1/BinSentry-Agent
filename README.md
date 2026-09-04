@@ -2,7 +2,25 @@
 
 面向 IoT 固件 Web/CGI 场景的智能二进制漏洞分析平台。项目结合 IDA Pro / Hex-Rays 静态分析、大模型 Agent 多轮推理、Source-to-Sink 验证、CVE 情报检索和可视化工作台，辅助分析人员从固件目录中定位重点二进制、发现可疑漏洞链路并整理证据。
 
-> 原项目名为 `VulnAgent-V2`，当前推荐项目展示名为 **BinSentry Agent**。
+> 原项目名为 `VulnAgent-V2`，当前推荐项目展示名为 **BinSentry Agent**（前端界面中仍显示 VulnAgent）。
+
+## 目录
+
+- [项目定位](#项目定位)
+- [界面预览](#界面预览)
+- [整体架构](#整体架构)
+- [分析工作流](#分析工作流)
+- [Agent 推理闭环](#agent-推理闭环)
+- [核心能力](#核心能力)
+- [数据持久化设计](#数据持久化设计)
+- [项目结构](#项目结构)
+- [技术栈](#技术栈)
+- [快速启动](#快速启动)
+- [常用命令](#常用命令)
+- [典型测试提示词](#典型测试提示词)
+- [测试](#测试)
+- [安全与仓库注意事项](#安全与仓库注意事项)
+- [项目说明](#项目说明)
 
 ## 项目定位
 
@@ -10,11 +28,43 @@
 
 核心思路：
 
-- 确定性扫描负责批量发现路由、Source、Sink 和高风险候选。
-- LLM Agent 负责围绕具体问题调用只读 IDA 工具并补齐证据。
-- Harness 负责统一运行边界、Trace、错误处理和持久化。
-- SQLite 保存会话、工具事件、调查状态、扫描报告和运行轨迹。
-- React 前端提供固件初筛、Agent Chat、会话管理、漏洞报告、CVE Intelligence 和 Trace 回放。
+- **确定性扫描**负责批量发现路由、Source、Sink 和高风险候选。
+- **LLM Agent** 负责围绕具体问题调用只读 IDA 工具并补齐证据。
+- **Harness** 负责统一运行边界、Trace、错误处理和持久化。
+- **SQLite** 保存会话、工具事件、调查状态、扫描报告和运行轨迹。
+- **React 前端**提供固件初筛、Agent Chat、会话管理、漏洞报告、CVE Intelligence 和 Trace 回放。
+
+### 态势总览（Dashboard）
+
+![image-20260904123942698](README.assets/image-20260904123942698.png)
+
+### Agent 对话（Agent Chat）
+
+![image-20260904124036086](README.assets/image-20260904124036086.png)
+
+### 固件分诊（Firmware Triage）
+
+![image-20260904124021572](README.assets/image-20260904124021572.png)
+
+### 调查会话（Sessions）
+
+![image-20260904124110141](README.assets/image-20260904124110141.png)
+
+### 漏洞发现（Findings）
+
+![image-20260904124120653](README.assets/image-20260904124120653.png)
+
+### 候选验证（Candidate Validation）
+
+![image-20260904124348631](README.assets/image-20260904124348631.png)
+
+### CVE 情报（CVE Intelligence）
+
+![image-20260904124417481](README.assets/image-20260904124417481.png)
+
+### 模型配置（Model Settings）
+
+![image-20260904124433602](README.assets/image-20260904124433602.png)
 
 ## 整体架构
 
@@ -134,7 +184,8 @@ erDiagram
 ## 项目结构
 
 ```text
-VulnAgent-V2/
+bin-sentry-agent/           # 仓库根（原 VulnAgent-V2）
+  README.assets/            # 界面截图（Typora 插入，见「界面预览」）
   frontend/                 React + Vite 前端工作台
   vulnagent/
     agent/                  LangGraph Agent、上下文管理、执行治理、Baseline Scan
@@ -146,6 +197,7 @@ VulnAgent-V2/
     intel/                  CVE.org / NVD / GitHub 情报检索与本地重排
     storage/                SQLite 持久化
     skills/                 固件 Web/CGI 分析提示词与领域规则
+    reports/                漏洞报告模型、存储与 API 路由
     tests/                  单元测试
   data/                     本地 SQLite 数据库，默认不提交
   reports/                  本地分析报告，默认不提交
@@ -211,35 +263,33 @@ npm run dev
 http://127.0.0.1:5173
 ```
 
-### Agent direct patch mode
+### Agent 直接补丁模式（direct patch mode）
 
-Agent Chat can mutate the active IDA database when direct write tools are enabled.
-Use this only on a copied IDB/input file.
+当启用直接写工具时，Agent Chat 可以修改当前激活的 IDA 数据库。请仅在复制的 IDB / 输入文件副本上使用该模式。
 
-Enable the API write gate:
+启用 API 写开关：
 
 ```env
 VULN_ENABLE_IDB_WRITES=true
 VULN_AGENT_DIRECT_IDB_WRITES=true
 ```
 
-Restart the IDA backend without `--read-only`:
+以非 `--read-only` 方式重启 IDA 后端：
 
 ```powershell
 python -m vulnagent --idb "E:\path\to\target.i64" --host 127.0.0.1 --port 8765
 ```
 
-Then ask Agent Chat to patch, NOP, rename, comment, or save. Supported operations:
+随后可让 Agent Chat 执行 patch、NOP、重命名、注释或保存。支持的操作包括：
 
-- patch exact bytes with optional `expected_original_hex`
-- NOP bytes
-- invert / force conditional jumps
-- rename function
-- set function comment
-- save IDA database
+- 精确补丁字节，可选 `expected_original_hex` 校验
+- NOP 填充字节
+- 反转 / 强制条件跳转
+- 重命名函数
+- 设置函数注释
+- 保存 IDA 数据库
 
-Keep `VULN_AGENT_DIRECT_IDB_WRITES=false` unless you want the Agent to execute patch
-operations directly from chat.
+除非你希望 Agent 直接在对话中执行补丁操作，否则保持 `VULN_AGENT_DIRECT_IDB_WRITES=false`。
 
 ### 5. 选择启动模式
 
